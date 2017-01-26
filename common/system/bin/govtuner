@@ -19,321 +19,1572 @@ busybox="/system/etc/GovTuner/busybox"
 getprop="/system/bin/getprop"
 init="/system/etc/init.d"
 PROFILE_DIR="$core/current"
-ver="3.5 BETA 1"
+ver="3.9.2 Beta 4"
 id="$(id)"; id="${id#*=}"; id="${id%%\(*}"; id="${id%% *}"
 CUR_GOVERNOR=$($busybox cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor);
 GOVERNOR=$CUR_GOVERNOR
-CLUSTER_DETECT="/sys/devices/system/cpu/cpu0/cpufreq/$CUR_GOVERNOR"
+REG_DIR="/sys/devices/system/cpu/cpufreq"
+CLU_DIR="/sys/devices/system/cpu/cpu0/cpufreq"
 FIRST_RUN="/data/system/first_run"
 CHECK2="$PROFILE_DIR/profile"
 INIT_TEST="/gt_test"
 VER=$($busybox awk -F= '/ro.build.version.release/{print $NF}' /system/build.prop)
-DEVICE=$($getprop ro.product.model | grep '[a-zA-Z0-9]');
-FREQ_SOURCE=/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies
+DEVICE=$($getprop ro.product.model | $busybox grep '[a-zA-Z0-9]');
+bigLITTLE=0
+CD=2
+SF=0
+HP=0
+HOTPLUG=2
+ROOT=0
 
+#CHECK number cores
+clear
+$busybox echo "Check number core:"
 $busybox sleep 1
-$busybox clear
-$busybox echo "Checking root"; $busybox sleep 0.2; $busybox clear;
-$busybox echo "Checking root."; $busybox sleep 0.2; $busybox clear;
-$busybox echo "Checking root.."; $busybox sleep 0.2; $busybox clear;
-$busybox echo "Checking root..."; $busybox sleep 0.2; $busybox clear;
-$busybox echo "Checking root..."; $busybox sleep 0.5; $busybox clear;
-$busybox echo "Checking root.."; $busybox sleep 0.2; $busybox clear;
-$busybox echo "Checking root."; $busybox sleep 0.2; $busybox clear;
-$busybox echo "Checking root"; $busybox sleep 0.5; $busybox clear;
+i=0
+while [ -d "/sys/devices/system/cpu/cpu$i" ]; do
+	i=$(($i + 1))
+	CORE=$i
+done
+clear
+$busybox echo -e "Check number core: \e[01;32mOK ($CORE)\e[00;37m"
+$busybox sleep 1
 
-if [ "$id" != "0" ] && [ "$id" != "root" ]; then
-	$busybox sleep 1
-	$busybox echo ""
-	$busybox echo ""
-	$busybox echo "    Unable to gain root access"
-	$busybox echo "    You might forgot to use su, or there's a problem with root"
-	$busybox echo "    Please type su first"
-	$busybox echo "    Then type govtuner"
-	$busybox echo ""
-	$busybox echo ""
-	$busybox sleep 1
-	exit
+
+	if [ $CORE -eq 1 ]; then
+		if [ "$ROOT" -eq 0 ]; then
+			$busybox echo "Check regular and small clusters:"
+			$busybox sleep 1
+		fi
+		#For REGULAR and SMALL clusters
+		CUR_GOVERNOR=$($busybox cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor);
+		if [ -d "/sys/devices/system/cpu/cpufreq/$CUR_GOVERNOR" ]; then
+			FINAL_PATH=$REG_DIR
+			CD=0
+		fi
+		if [ -d "/sys/devices/system/cpu/cpu0/cpufreq/$CUR_GOVERNOR" ]; then
+			FINAL_PATH=$CLU_DIR
+			CD=1
+			CLUSTER[0]=0
+		fi
 	else
-		$busybox clear
-		$busybox sleep 0.3
-		$busybox echo "Root access succesfully acquired"
-		$busybox sleep 0.3
-		$busybox echo ""
-		$busybox echo "Loading GovTuner setup..."
-		$busybox sleep 0.3
-		$busybox echo ""
-		$busybox sleep 0.3
-		$busybox clear
-fi
-echo "After applying a profile..."
-sleep 1
-echo "... Wait for 3 seconds before closing the window!"
-sleep 2
+		#CHECK number clusters
+		if [ "$ROOT" -eq 0 ]; then
+			$busybox echo "Check number clusters:"
+		fi
+		x=0
+		while [ $x -le $(($CORE - 1)) ]; do
+			RELATED_CPUS="/sys/devices/system/cpu/cpu$x/cpufreq/related_cpus"
+			if [ -f "$RELATED_CPUS" ]; then
+				if [ ${#CLUSTER[@]} -gt 0 ]; then
+					if [ ${#CLUSTER[@]} -eq 1 ] && [ "$($busybox cat $RELATED_CPUS)" !=  "$RC" ]; then
+						CLUSTER[1]=$x
+						RC=$($busybox cat $RELATED_CPUS)
+					elif [ ${#CLUSTER[@]} -eq 2 ] && [ "$($busybox cat $RELATED_CPUS)" !=  "$RC" ]; then
+						CLUSTER[2]=$x
+						break
+					else
+						if [ "$($busybox cat $RELATED_CPUS)" =  "$RC" ]; then
+							RC=$($busybox cat $RELATED_CPUS)
+						fi
+					fi
+				else
+					CLUSTER[0]=$x
+					RC=$($busybox cat $RELATED_CPUS)
+				fi
+			fi
+			x=$(($x + 1))
+		done
+		if [ "$ROOT" -eq 0 ]; then
+			$busybox echo "Check regular and small clusters:"
+			$busybox sleep 1
+		fi
+		#For REGULAR and SMALL clusters
+		CUR_GOVERNOR=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_governor);
+		if [ -d "/sys/devices/system/cpu/cpufreq/$CUR_GOVERNOR" ]; then
+			FINAL_PATH=$REG_DIR
+			CD=0
+		fi
+		if [ -d "/sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/$CUR_GOVERNOR" ]; then
+			FINAL_PATH=$CLU_DIR
+			CD=1
+		fi
+	fi
+	if [ "$ROOT" -eq 0 ]; then
+		if [ $CORE -eq 1 ]; then
+			$busybox clear
+			$busybox echo -e "Check number core: \e[01;32mOK ($CORE)\e[00;37m"
+			$busybox echo -e "Check regular and small clusters: \e[01;32mOK (CD$CD)\e[00;37m"
+			$busybox echo "Check number clusters:"
+			$busybox sleep 1
+			$busybox clear
+			$busybox echo -e "Check number core: \e[01;32mOK ($CORE)\e[00;37m"
+			$busybox echo -e "Check regular and small clusters: \e[01;32mOK (CD$CD)\e[00;37m"
+			$busybox echo "Check number clusters:"
+			$busybox sleep 1
+			$busybox clear
+			$busybox echo -e "Check number core: \e[01;32mOK ($CORE)\e[00;37m"
+			$busybox echo -e "Check regular and small clusters: \e[01;32mOK (CD$CD)\e[00;37m"
+			$busybox echo -e "Check number clusters: \e[01;32mOK (${#CLUSTER[@]})\e[00;37m"
+		fi
+		if [ $CORE -gt 1 ]; then
+			$busybox clear
+			$busybox echo -e "Check number core: \e[01;32mOK ($CORE)\e[00;37m"
+			$busybox echo "Check number clusters:"
+			$busybox echo -e "Check regular and small clusters: \e[01;32mOK (CD$CD)\e[00;37m"
+			$busybox sleep 1
+			$busybox clear
+			$busybox echo -e "Check number core: \e[01;32mOK ($CORE)\e[00;37m"
+			$busybox echo "Check number clusters:"
+			$busybox echo -e "Check regular and small clusters: \e[01;32mOK (CD$CD)\e[00;37m"
+			$busybox sleep 1
+			$busybox clear
+			$busybox echo -e "Check number core: \e[01;32mOK ($CORE)\e[00;37m"
+			$busybox echo -e "Check number clusters: \e[01;32mOK (${#CLUSTER[@]})\e[00;37m"
+			$busybox echo -e "Check regular and small clusters: \e[01;32mOK (CD$CD)\e[00;37m"
+		fi
+		$busybox sleep 1
+	fi
 
+	#CHECK scaling frequencies
+	if [ "$ROOT" -eq 0 ]; then
+		$busybox echo "Check scaling frequencies:"
+		$busybox sleep 1
+	fi
+	if [ "$CD" -eq 1 ] && [ "$CD" -ne 0 ]; then
+		x=0
+		for i in ${CLUSTER[@]}; do
+			if [ -f /sys/devices/system/cpu/cpu$i/cpufreq/scaling_available_frequencies ]; then
+				SF=1
+			elif [ -f /sys/devices/system/cpu/cpufreq/mp-cpufreq/cluster$x_freq_table ]; then
+				SF=2
+			else
+				CD=3
+				Show_freq[0]=false
+			fi
+			x=$(($x + 1))
+		done
+	elif [ "$CD" -eq 0 ] && [ "$CD" -ne 1 ]; then
+		if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies ]; then
+			SF=1
+		else
+			CD=3
+			Show_freq[0]=false
+		fi
+	fi
+
+	#CHECK bigLITTLE
+	if [ ${#CLUSTER[@]} -ge 2 ]; then
+		if [ "$ROOT" -eq 0 ]; then
+			$busybox echo "Check bigLITTLE:"
+			$busybox sleep 1
+		fi
+		a=0
+		for i in ${CLUSTER[@]}; do
+			if [ $SF -eq 1 ]; then
+				scaling_freq=$($busybox cat /sys/devices/system/cpu/cpu$i/cpufreq/scaling_available_frequencies);
+				if [ "$scaling_freq" != "$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_available_frequencies)" ]; then
+					bigLITTLE=1
+				fi
+			fi
+			if [ $SF -eq 2 ]; then
+				scaling_freq=$($busybox cat /sys/devices/system/cpu/cpufreq/mp-cpufreq/cluster$a_freq_table);
+				if [ "$scaling_freq" != "$($busybox cat /sys/devices/system/cpu/cpufreq/mp-cpufreq/cluster0_freq_table)" ]; then
+					bigLITTLE=1
+				fi
+			fi
+			a=$(($a + 1))
+		done
+	fi
+
+	if [ "$ROOT" -eq 0 ]; then
+		if [ $CORE -eq 1 ]; then
+			$busybox clear
+			$busybox echo -e "Check number core: \e[01;32mOK ($CORE)\e[00;37m"
+			$busybox echo -e "Check regular and small clusters: \e[01;32mOK (CD$CD)\e[00;37m"
+			$busybox echo -e "Check number clusters: \e[01;32mOK (${#CLUSTER[@]})\e[00;37m"
+			$busybox echo -e "Check scaling frequencies: \e[01;32mOK (SF$SF)\e[00;37m"
+			$busybox echo "Check bigLITTLE:"
+			$busybox sleep 2
+			$busybox clear
+			$busybox echo -e "Check number core: \e[01;32mOK ($CORE)\e[00;37m"
+			$busybox echo -e "Check regular and small clusters: \e[01;32mOK (CD$CD)\e[00;37m"
+			$busybox echo -e "Check number clusters: \e[01;32mOK (${#CLUSTER[@]})\e[00;37m"
+			$busybox echo -e "Check scaling frequencies: \e[01;32mOK (SF$SF)\e[00;37m"
+			$busybox echo -e "Check bigLITTLE: \e[01;32mOK ($bigLITTLE)\e[00;37m"
+		fi
+		if [ $CORE -gt 1 ]; then
+			$busybox clear
+			$busybox echo -e "Check number core: \e[01;32mOK ($CORE)\e[00;37m"
+			$busybox echo -e "Check number clusters: \e[01;32mOK (${#CLUSTER[@]})\e[00;37m"
+			$busybox echo -e "Check regular and small clusters: \e[01;32mOK (CD$CD)\e[00;37m"
+			$busybox echo -e "Check scaling frequencies: \e[01;32mOK (SF$SF)\e[00;37m"
+			$busybox echo "Check bigLITTLE:"
+			$busybox sleep 2
+			$busybox clear
+			$busybox echo -e "Check number core: \e[01;32mOK ($CORE)\e[00;37m"
+			$busybox echo -e "Check number clusters: \e[01;32mOK (${#CLUSTER[@]})\e[00;37m"
+			$busybox echo -e "Check regular and small clusters: \e[01;32mOK (CD$CD)\e[00;37m"
+			$busybox echo -e "Check scaling frequencies: \e[01;32mOK (SF$SF)\e[00;37m"
+			$busybox echo -e "Check bigLITTLE: \e[01;32mOK ($bigLITTLE)\e[00;37m"
+		fi
+		$busybox sleep 1
+	fi
 while true; do
-if [ -f $PROFILE_DIR/GovTuner_battery ]; then
-	profile="\e[1;33mBattery\e[0m"
-  c=1
-elif [ -f $PROFILE_DIR/GovTuner_balanced ]; then
-	profile="\e[1;32mBalanced\e[0m"
-  c=6
-elif [ -f $PROFILE_DIR/GovTuner_performance ]; then
-	profile="\e[1;35mPerformance\e[0m"
-  c=4
-else
-	profile="\e[1;30mDefault\e[0m"
-  c=0
-fi
+	#SET ARRAY
+	if [ ${#CLUSTER[@]} -eq 3 ]; then
+		#For TRIPLE CLUSTER
+		CUR_GOVERNOR[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
+		CUR_GOVERNOR[1]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
+		CUR_GOVERNOR[2]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[2]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
+		CUR_GOVERNOR_UP[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
+		CUR_GOVERNOR_UP[1]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
+		CUR_GOVERNOR_UP[2]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[2]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
+		CLU_DIR[0]="/sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq";
+		CLU_DIR[1]="/sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq";
+		CLU_DIR[2]="/sys/devices/system/cpu/cpu${CLUSTER[2]}/cpufreq";
+		AVAILABLE_GOVERNORS[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_available_governors);
+		AVAILABLE_GOVERNORS[1]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/scaling_available_governors);
+		AVAILABLE_GOVERNORS[2]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[2]}/cpufreq/scaling_available_governors);
+		GOVERNOR[0]="${CLU_DIR[0]}/${CUR_GOVERNOR[0]}";
+		GOVERNOR[1]="${CLU_DIR[1]}/${CUR_GOVERNOR[1]}";
+		GOVERNOR[2]="${CLU_DIR[2]}/${CUR_GOVERNOR[2]}";
+		MIN_CPU_FREQ[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/cpuinfo_min_freq);
+		MIN_CPU_FREQ[1]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/cpuinfo_min_freq);
+		MIN_CPU_FREQ[2]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[2]}/cpufreq/cpuinfo_min_freq);
+		MAX_CPU_FREQ[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/cpuinfo_max_freq);
+		MAX_CPU_FREQ[1]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/cpuinfo_max_freq);
+		MAX_CPU_FREQ[2]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[2]}/cpufreq/cpuinfo_max_freq);
+		if [ $SF -eq 1 ]; then
+			FREQ_SOURCE[0]="/sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_available_frequencies";
+			FREQ_SOURCE[1]="/sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/scaling_available_frequencies";
+			FREQ_SOURCE[2]="/sys/devices/system/cpu/cpu${CLUSTER[2]}/cpufreq/scaling_available_frequencies";
+		elif [ $SF -eq 2 ]; then
+			FREQ_SOURCE[0]="/sys/devices/system/cpu/cpufreq/mp-cpufreq/cluster0_freq_table";
+			FREQ_SOURCE[1]="/sys/devices/system/cpu/cpufreq/mp-cpufreq/cluster1_freq_table";
+			FREQ_SOURCE[2]="/sys/devices/system/cpu/cpufreq/mp-cpufreq/cluster2_freq_table";
+		fi
+	elif [ ${#CLUSTER[@]} -eq 2 ]; then
+		#For DUAL CLUSTER
+		CUR_GOVERNOR[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
+		CUR_GOVERNOR[1]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
+		CUR_GOVERNOR_UP[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
+		CUR_GOVERNOR_UP[1]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
+		CLU_DIR[0]="/sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq";
+		CLU_DIR[1]="/sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq";
+		AVAILABLE_GOVERNORS[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_available_governors);
+		AVAILABLE_GOVERNORS[1]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/scaling_available_governors);
+		GOVERNOR[0]="${CLU_DIR[0]}/${CUR_GOVERNOR[0]}";
+		GOVERNOR[1]="${CLU_DIR[1]}/${CUR_GOVERNOR[1]}";
+		MIN_CPU_FREQ[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/cpuinfo_min_freq);
+		MIN_CPU_FREQ[1]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/cpuinfo_min_freq);
+		MAX_CPU_FREQ[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/cpuinfo_max_freq);
+		MAX_CPU_FREQ[1]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/cpuinfo_max_freq);
+		if [ $SF -eq 1 ]; then
+			FREQ_SOURCE[0]="/sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_available_frequencies";
+			FREQ_SOURCE[1]="/sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/scaling_available_frequencies";
+		elif [ $SF -eq 2 ]; then
+			FREQ_SOURCE[0]="/sys/devices/system/cpu/cpufreq/mp-cpufreq/cluster0_freq_table";
+			FREQ_SOURCE[1]="/sys/devices/system/cpu/cpufreq/mp-cpufreq/cluster1_freq_table";
+		fi
+	else
+		if [ "$CD" -eq 1 ] && [ "$CD" -ne 0 ]; then
+			#For SINGLE CLUSTER
+			CUR_GOVERNOR[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
+			CUR_GOVERNOR_UP[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
+			CLU_DIR[0]="/sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq";
+			AVAILABLE_GOVERNORS[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_available_governors);
+			GOVERNOR[0]="${CLU_DIR[0]}/${CUR_GOVERNOR[0]}";
+			MIN_CPU_FREQ[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/cpuinfo_min_freq);
+			MAX_CPU_FREQ[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/cpuinfo_max_freq);
+			if [ $SF -eq 1 ]; then
+				FREQ_SOURCE[0]="/sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_available_frequencies";
+			elif [ $SF -eq 2 ]; then
+				FREQ_SOURCE[0]="/sys/devices/system/cpu/cpufreq/mp-cpufreq/cluster0_freq_table";
+			fi
+		fi
+		if [ "$CD" -eq 0 ] && [ "$CD" -ne 1 ]; then
+			#For REGULAR
+			CUR_GOVERNOR[0]=$($busybox cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
+			CUR_GOVERNOR_UP[0]=$($busybox cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
+			CLU_DIR[0]="/sys/devices/system/cpu/cpufreq";
+			AVAILABLE_GOVERNORS[0]=$($busybox cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors);
+			GOVERNOR[0]="${CLU_DIR[0]}/${CUR_GOVERNOR[0]}";
+			MIN_CPU_FREQ[0]=$($busybox cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq);
+			MAX_CPU_FREQ[0]=$($busybox cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq);
+			if [ $SF -eq 1 ]; then
+				FREQ_SOURCE[0]="/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies";
+			fi
+		fi
+	fi
+	#Export array
+	for i in ${CUR_GOVERNOR[@]}; do export CUR_GOVERNOR_$i="${CUR_GOVERNOR[$i]}"; done
+	for i in ${CUR_GOVERNOR_UP[@]}; do export CUR_GOVERNOR_UP_$i="${CUR_GOVERNOR_UP[$i]}"; done
+	for i in ${CLU_DIR[@]}; do export CLU_DIR_$i="${CLU_DIR[$i]}"; done
+	for i in ${GOVERNOR[@]}; do export GOVERNOR_$i="${GOVERNOR[$i]}"; done
+	for i in ${MIN_CPU_FREQ[@]}; do export MIN_CPU_FREQ_$i="${MIN_CPU_FREQ[$i]}"; done
+	for i in ${MAX_CPU_FREQ[@]}; do export MAX_CPU_FREQ_$i="${MAX_CPU_FREQ[$i]}"; done
+	for i in ${AVAILABLE_GOVERNORS[@]}; do export AVAILABLE_GOVERNORS_$i="${AVAILABLE_GOVERNORS[$i]}"; done
+	for i in ${FREQ_SOURCE[@]}; do export FREQ_SOURCE_$i="${FREQ_SOURCE[$i]}"; done
+	for i in ${CLUSTER[@]}; do export CLUSTER_$i="${CLUSTER[$i]}"; done
 
-$busybox sleep 0.5
-$busybox clear;
-$busybox clear;
-echo "                      "
-$busybox sleep 0.4
-echo -e "\e[01;3"$c"m  _____               \e[00;37m"
-$busybox sleep 0.1
-echo -e "\e[01;3"$c"m / ____|              \e[00;37m"
-$busybox sleep 0.1
-echo -e "\e[01;3"$c"m | | __  _____    __ \e[00;37m"
-$busybox sleep 0.1
-echo -e "\e[01;3"$c"m | ||_ |/ _ \ \  / / \e[00;37m"
-$busybox sleep 0.1
-echo -e "\e[01;3"$c"m | |_| | (_) \ \/ /  \e[00;37m"
-$busybox sleep 0.1
-echo -e "\e[01;3"$c"m \_____|\___/ \__/   \e[00;37m"          
-$busybox sleep 0.1
-echo -e "\e[01;3"$c"m      _______                   \e[00;37m"
-$busybox sleep 0.1
-echo -e "\e[01;3"$c"m     |__   __|                  \e[00;37m"
-$busybox sleep 0.1
-echo -e "\e[01;3"$c"m        | |_   _ _,__   ____,__ \e[00;37m"
-$busybox sleep 0.1
-echo -e "\e[01;3"$c"m        | | | | |  _ \ / _ \ __| \e[00;37m"
-$busybox sleep 0.1
-echo -e "\e[01;3"$c"m        | | |_| | | | |  __/ |  \e[00;37m"
-$busybox sleep 0.1
-echo -e "\e[01;3"$c"m        |_|\__,_|_| |_|\___|_|  \e[00;37m"
-$busybox sleep 0.1
-echo "                                 " 
+	#CHECK LITTLE/MIDDLE/BIG CORE
+	if [ ${#CLUSTER[@]} -ge 2 ]; then
+		if [ "$ROOT" -eq 0 ]; then
+			if [ ${#CLUSTER[@]} -eq 3 ]; then
+				$busybox echo "Check big/middle/little clusters:"
+			else
+				$busybox echo "Check big/little clusters:"
+			fi
+			$busybox sleep 1
+		fi
+		a=0
+		for i in ${CLUSTER[@]}; do
+			#Freq core
+			if [ "$SF" -eq 1 ] || [ "$SF" -eq 2 ]; then
+				UFREQ[$a]=$($busybox awk '{print $NF}' ${FREQ_SOURCE[$a]});
+				LFREQ[$a]=$($busybox awk -v 1=$1 '{print $1}' ${FREQ_SOURCE[$a]});
+				Show_freq[$a]=2
+			fi
+			if [ "$SF" -eq 0 ] && [ -f /sys/devices/system/cpu/cpu$i/cpufreq/scaling_max_freq ]; then
+				UFREQ[$a]=$($busybox cat /sys/devices/system/cpu/cpu$i/cpufreq/scaling_max_freq);
+				LFREQ[$a]=$($busybox cat /sys/devices/system/cpu/cpu$i/cpufreq/scaling_min_freq);
+				Show_freq[$a]=2
+			fi
+			if [ ! -f /sys/devices/system/cpu/cpu$i/cpufreq/scaling_max_freq ] && [ "$SF" -eq 0 ]; then
+				Show_freq[$a]=0
+			fi
+			if [ "${Show_freq[$a]}" -eq 0 ]; then
+				$busybox echo ""
+				$busybox echo $divider
+			fi
+			if [ "${Show_freq[$a]}" -eq 2 ]; then
+				MAX_FREQ[$a]=$((${UFREQ[$a]} / 1000));
+				MIN_FREQ[$a]=$((${LFREQ[$a]} / 1000));
+			fi
+			C[$a]=${MAX_FREQ[$a]}
+			a=$(($a + 1))
+		done
+		if [ ${#CLUSTER[@]} -eq 3 ]; then
+			if [ "${C[0]}" -le "${C[1]}" ] && [ "${C[1]}" -le "${C[2]}" ]; then
+				LITTLE_CORE=${CLUSTER[0]}
+				MIDDLE_CORE=${CLUSTER[1]}
+				BIG_CORE=${CLUSTER[2]}
+				IN=0
+			elif [ "${C[0]}" -ge "${C[1]}" ] && [ "${C[1]}" -ge "${C[2]}" ]; then
+				LITTLE_CORE=${CLUSTER[2]}
+				MIDDLE_CORE=${CLUSTER[1]}
+				BIG_CORE=${CLUSTER[0]}
+				IN=1
+			fi
+			export LITTLE_CORE MIDDLE_CORE BIG_CORE;
+		else
+			if [ $bigLITTLE -eq 1 ]; then
+				if [ "${C[0]}" -lt "${C[1]}" ]; then
+					LITTLE_CORE=${CLUSTER[0]}
+					BIG_CORE=${CLUSTER[1]}
+					IN=0
+				elif [ "${C[0]}" -gt "${C[1]}" ]; then
+					LITTLE_CORE=${CLUSTER[1]}
+					BIG_CORE=${CLUSTER[0]}
+					IN=1
+				fi
+				export LITTLE_CORE BIG_CORE;
+			else
+				CPU1=${CLUSTER[0]}
+				CPU2=${CLUSTER[1]}
+				export CPU1 CPU2;
+			fi
+		fi
+	fi
+	export CORE CD SF bigLITTLE IN;
+	if [ "$ROOT" -eq 0 ]; then
+		if [ $CORE -eq 1 ]; then
+			$busybox clear
+			$busybox echo -e "Check number core: \e[01;32mOK ($CORE)\e[00;37m"
+			$busybox echo -e "Check regular and small clusters: \e[01;32mOK (CD$CD)\e[00;37m"
+			$busybox echo -e "Check number clusters: \e[01;32mOK (${#CLUSTER[@]})\e[00;37m"
+			$busybox echo -e "Check scaling frequencies: \e[01;32mOK (SF$SF)\e[00;37m"
+			$busybox echo -e "Check bigLITTLE: \e[01;32mOK ($bigLITTLE)\e[00;37m"
+		fi
+		if [ $CORE -gt 1 ]; then
+			$busybox clear
+			$busybox echo -e "Check number core: \e[01;32mOK ($CORE)\e[00;37m"
+			$busybox echo -e "Check number clusters: \e[01;32mOK (${#CLUSTER[@]})\e[00;37m"
+			$busybox echo -e "Check regular and small clusters: \e[01;32mOK (CD$CD)\e[00;37m"
+			$busybox echo -e "Check scaling frequencies: \e[01;32mOK (SF$SF)\e[00;37m"
+			$busybox echo -e "Check bigLITTLE: \e[01;32mOK ($bigLITTLE)\e[00;37m"
+		fi
+		if [ ${#CLUSTER[@]} -eq 3 ]; then
+			$busybox echo -e "Check big/middle/little clusters: \e[01;32mOK (BIG: $BIG_CORE / MIDDLE: $MIDDLE_CORE / LITTLE: $LITTLE_CORE)\e[00;37m"
+		elif [ ${#CLUSTER[@]} -eq 2 ]; then
+			$busybox echo -e "Check big/little clusters: \e[01;32mOK (BIG: $BIG_CORE / LITTLE: $LITTLE_CORE)\e[00;37m"
+		fi
+	fi
+	if [ "$ROOT" -eq 0 ]; then
+		$busybox sleep 2
+		$busybox clear
+		$busybox echo "Checking root"; $busybox sleep 0.2; $busybox clear;
+		$busybox echo "Checking root."; $busybox sleep 0.2; $busybox clear;
+		$busybox echo "Checking root.."; $busybox sleep 0.2; $busybox clear;
+		$busybox echo "Checking root..."; $busybox sleep 0.2; $busybox clear;
+		$busybox echo "Checking root..."; $busybox sleep 0.5; $busybox clear;
+		$busybox echo "Checking root.."; $busybox sleep 0.2; $busybox clear;
+		$busybox echo "Checking root."; $busybox sleep 0.2; $busybox clear;
+		$busybox echo "Checking root"; $busybox sleep 0.5; $busybox clear;
 
-$busybox echo -e "Profile: $profile"
-if [ -d "$CLUSTER_DETECT" ]; then
-$busybox echo -e "Cluster device: Yes"
-else
-$busybox echo -e "Cluster device: No"
-fi
-$busybox echo "Device: ${DEVICE}" 
-$busybox echo "Android Version: ${VER}"
-if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies ]; then
-UFREQ=$($busybox awk '{print $NF}' $FREQ_SOURCE);
-LFREQ=$($busybox awk -v 1=$1 '{print $1}' $FREQ_SOURCE);
-elif [ ! -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies ] &&  [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq ]; then
-UFREQ=$($busybox cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq);
-LFREQ=$($busybox cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq);
-elif [ ! -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq ] &&  [ ! -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies ]; then
-  Show_freq=false
-else
- Show_freq=false
-fi
-if [ "$Show_freq" = "false" ]; then
-   $busybox echo ""
-   $busybox echo $divider
-else
-   MAX_FREQ=$(($UFREQ / 1000 ));
-   MIN_FREQ=$(($LFREQ / 1000 ));
-   $busybox echo "CPU Min: $MIN_FREQ MHz"
-   $busybox echo "CPU Max: $MAX_FREQ MHz"
-   $busybox echo ""
-   $busybox echo $divider
-fi
-$busybox echo ""
-$busybox echo "        -Please choose a profile-"
-$busybox echo ""
-$busybox echo $divider
-$busybox echo ""
-$busybox echo -e "\e[01;31m     1 - Battery \e[00;37m"
-$busybox echo ""
-$busybox echo -e "\e[01;36m     2 - Balanced \e[00;37m"
-$busybox echo ""
-$busybox echo -e "\e[01;34m     3 - Performance \e[00;37m"
-$busybox echo ""
-$busybox echo $divider
-$busybox echo ""
-$busybox echo -e "\e[01;37m u - Disable GovTuner \e[00;37m"
-$busybox echo -e "\e[01;37m c. $ver Changelog \e[00;37m"
-$busybox echo " e. Exit"
-$busybox echo ""
-$busybox echo $divider
-$busybox echo ""
-$busybox echo ""
-OUTPUT_ID=$($busybox cat /data/system/test);
-if ps | grep "$OUTPUT_ID"
-    then
-            echo -e "\e[01;37m GovTuner \e[00;37m : \e[01;32m ACTIVE \e[00;37m"
-else
-       echo -e "\e[01;37m GovTuner \e[00;37m : \e[01;31m INACTIVE \e[00;37m"
-fi
-$busybox echo ""
-if [ -f "$INIT_TEST" ]; then
-    echo -e "\e[01;37m Init.d \e[00;37m : \e[01;32m WORKING \e[00;37m"
-else
-     echo -e "\e[01;37m Init.d \e[00;37m : \e[01;31m NOT WORKING \e[00;37m"
-     $busybox echo -e "\e[01;37m If you use 3rd party init.d emulators, as Kernel Adiutor init.d emulator, it's fine as well, it just won't show up here as active \e[00;37m"
-fi
-$busybox echo ""
-$busybox echo -n "Please select a profile:"
-read -r character
-case $character in
-1)$busybox clear
-$busybox echo ""
-$busybox echo "Activating battery profile"
-$busybox sleep 0.3
-if [ ! -f "$CHECK2" ]; then
-   echo 1 > $FIRST_RUN
-else
-   echo 0 > $FIRST_RUN
-fi
-$busybox echo ""
-$busybox sleep 0.2
-$busybox echo "Copying battery profile to init.d"
-$busybox sleep 0.3
-$busybox echo ""
-$busybox mount -o remount,rw /system 2>/dev/null
-mount -o remount,rw /system 2>/dev/null
+		if [ "$id" != "0" ] && [ "$id" != "root" ]; then
+			$busybox sleep 1
+			$busybox echo ""
+			$busybox echo ""
+			$busybox echo "    Unable to gain root access"
+			$busybox echo "    You might forgot to use su, or there's a problem with root"
+			$busybox echo "    Please type su first"
+			$busybox echo "    Then type govtuner"
+			$busybox echo ""
+			$busybox echo ""
+			$busybox sleep 1
+			exit
+		else
+			ROOT=1
+			$busybox clear
+			$busybox sleep 0.3
+			$busybox echo "Root access succesfully acquired"
+			$busybox sleep 0.3
+			$busybox echo ""
+			$busybox echo "Loading GovTuner setup..."
+			$busybox sleep 0.3
+			$busybox echo ""
+			$busybox sleep 0.3
+			$busybox clear
+		fi
+	fi
+	echo "After applying a profile..."
+	sleep 1
+	echo "... Wait for 3 seconds before closing the window!"
+	sleep 2
 
-if [ -e $PROFILE_DIR/GovTuner_balanced ]; then
-	$busybox rm -rf $PROFILE_DIR/GovTuner_balanced
-fi
-if [ -e $PROFILE_DIR/GovTuner_performance ]; then
-	$busybox rm -rf $PROFILE_DIR/GovTuner_performance
-fi
-$busybox cp -f $core/profiles/GovTuner_battery $PROFILE_DIR/GovTuner_battery
-$busybox chmod 755 $PROFILE_DIR/GovTuner_battery
-$busybox echo "Applying battery tweaks"
-$busybox sleep 0.4
-$busybox echo ""
-$busybox setsid $PROFILE_DIR/GovTuner_battery&
-$busybox sleep 0.3
-$busybox echo ""
-$busybox sleep 5
-$busybox clear
-$busybox echo "GovTuner battery profile activated"
-$busybox echo ""
-$busybox echo ""
-$busybox sleep 1
-$busybox clear ;;
+	if [ -f $PROFILE_DIR/GovTuner_battery ]; then
+		profile="\e[1;33mBattery\e[0m"
+		c=1
+	elif [ -f $PROFILE_DIR/GovTuner_balanced ]; then
+		profile="\e[1;32mBalanced\e[0m"
+		c=6
+	elif [ -f $PROFILE_DIR/GovTuner_performance ]; then
+		profile="\e[1;35mPerformance\e[0m"
+		c=4
+	else
+		profile="\e[1;30mDefault\e[0m"
+		c=0
+	fi
 
-2)$busybox clear
-$busybox echo ""
-$busybox echo "Activating balanced profile"
-$busybox sleep 0.3
-$busybox echo ""
-if [ ! -f "$CHECK2" ]; then
-   echo 1 > $FIRST_RUN
-else
-   echo 0 > $FIRST_RUN
-fi
-$busybox sleep 0.2
-$busybox echo "Copying balanced profile to init.d"
-$busybox sleep 0.3
-$busybox echo ""
-$busybox mount -o remount,rw /system 2>/dev/null
-mount -o remount,rw /system 2>/dev/null
-if [ -e $PROFILE_DIR/GovTuner_battery ]; then
-	$busybox rm -rf $PROFILE_DIR/GovTuner_battery
-fi
-if [ -e $PROFILE_DIR/GovTuner_performance ]; then
-	$busybox rm -rf $PROFILE_DIR/GovTuner_performance
-fi
-$busybox cp -f $core/profiles/GovTuner_balanced $PROFILE_DIR/GovTuner_balanced
-$busybox chmod 755 $PROFILE_DIR/GovTuner_balanced
-$busybox echo "Applying balanced tweaks"
-$busybox sleep 0.4
-$busybox echo ""
-$busybox setsid $PROFILE_DIR/GovTuner_balanced&
-$busybox sleep 0.3
-$busybox echo ""
-$busybox sleep 5
-$busybox clear
-$busybox echo "GovTuner balanced profile activated"
-$busybox echo ""
-$busybox echo ""
-$busybox sleep 1
-$busybox clear ;;
+	$busybox sleep 0.5
+	$busybox clear;
+	$busybox clear;
+	echo "                      "
+	$busybox sleep 0.4
+	echo -e "\e[01;3"$c"m  _____               \e[00;37m"
+	$busybox sleep 0.1
+	echo -e "\e[01;3"$c"m / ____|              \e[00;37m"
+	$busybox sleep 0.1
+	echo -e "\e[01;3"$c"m | | __  _____    __ \e[00;37m"
+	$busybox sleep 0.1
+	echo -e "\e[01;3"$c"m | ||_ |/ _ \ \  / / \e[00;37m"
+	$busybox sleep 0.1
+	echo -e "\e[01;3"$c"m | |_| | (_) \ \/ /  \e[00;37m"
+	$busybox sleep 0.1
+	echo -e "\e[01;3"$c"m \_____|\___/ \__/   \e[00;37m"
+	$busybox sleep 0.1
+	echo -e "\e[01;3"$c"m      _______                   \e[00;37m"
+	$busybox sleep 0.1
+	echo -e "\e[01;3"$c"m     |__   __|                  \e[00;37m"
+	$busybox sleep 0.1
+	echo -e "\e[01;3"$c"m        | |_   _ _,__   ____,__ \e[00;37m"
+	$busybox sleep 0.1
+	echo -e "\e[01;3"$c"m        | | | | |  _ \ / _ \ __| \e[00;37m"
+	$busybox sleep 0.1
+	echo -e "\e[01;3"$c"m        | | |_| | | | |  __/ |  \e[00;37m"
+	$busybox sleep 0.1
+	echo -e "\e[01;3"$c"m        |_|\__,_|_| |_|\___|_|  \e[00;37m"
+	$busybox sleep 0.1
+	echo "                                 "
 
-3)$busybox clear
-$busybox echo ""
-$busybox echo "Activating performance profile"
-$busybox sleep 0.3
-$busybox echo ""
-if [ ! -f "$CHECK2" ]; then
-   echo 1 > $FIRST_RUN
-else
-   echo 0 > $FIRST_RUN
-fi
-$busybox sleep 0.2
-$busybox echo "Copying performance profile to init.d"
-$busybox sleep 0.3
-$busybox echo ""
-$busybox mount -o remount,rw /system 2>/dev/null
-mount -o remount,rw /system 2>/dev/null
-if [ -e $PROFILE_DIR/GovTuner_battery ]; then
-	$busybox rm -rf $PROFILE_DIR/GovTuner_battery
-fi
-if [ -e $PROFILE_DIR/GovTuner_balanced ]; then
-	$busybox rm -rf $PROFILE_DIR/GovTuner_balanced
-fi
-$busybox cp -f $core/profiles/GovTuner_performance $PROFILE_DIR/GovTuner_performance
-$busybox chmod 755 $PROFILE_DIR/GovTuner_performance
-$busybox echo "Applying performance tweaks"
-$busybox sleep 0.4
-$busybox echo ""
-$busybox setsid $PROFILE_DIR/GovTuner_performance&
-$busybox sleep 0.3
-$busybox echo ""
-$busybox sleep 5
-$busybox clear
-$busybox echo "GovTuner performance profile activated"
-$busybox echo ""
-$busybox echo ""
-$busybox sleep 1
-$busybox clear ;;
+	$busybox echo -e "Profile: $profile"
+	$busybox echo ""
+	a=0
+	for i in ${CUR_GOVERNOR[@]}; do
+		if [ $i = "zzmoove" ]; then
+			if [ "$CD" -eq 1 ] && [ "$CD" -ne 0 ]; then
+				if [ ${GOVERNOR[$a]}/disable_hotplug ]; then
+					HOTPLUG=$($busybox cat ${GOVERNOR[$a]}/disable_hotplug)
+				fi
+			fi
+			if [ "$CD" -eq 0 ] && [ "$CD" -ne 1 ]; then
+				if [ /sys/devices/system/cpu/cpufreq/zzmoove/disable_hotplug ]; then
+					HOTPLUG=$($busybox cat /sys/devices/system/cpu/cpufreq/zzmoove/disable_hotplug)
+				fi
+			fi
+			if [ $HOTPLUG == 1 ]; then
+				$busybox echo -e "CPU$a Hotplug: Stock Hotplug"
+			fi
+			if [ $HOTPLUG == 0 ]; then
+				$busybox echo -e "CPU$a Hotplug: Zzmoove Tweaked Hotplug"
+			fi
+			$busybox echo ""
+		fi
+		a=$(($a + 1))
+	done
+	if [ "$CD" -eq 1 ] && [ "$CD" -ne 0 ]; then
+		$busybox echo -e "Cluster device: \e[01;37mYes\e[00;37m"
+		$busybox echo ""
+	else
+		$busybox echo -e "Cluster device: No"
+		$busybox echo ""
+	fi
+	if [ $bigLITTLE -eq 1 ]; then
+		#For bigLITTLE
+		$busybox echo -e "bigLITTLE: \e[01;37mpresent\e[00;37m"
+		$busybox echo ""
+		if [ ${#CLUSTER[@]} -eq 3 ]; then
+			#For 3 CPU
+			if [ $IN -eq 0 ]; then
+				$busybox echo -e "Governor LITTLE core: \e[01;37m${CUR_GOVERNOR[0]}\e[00;37m"
+				$busybox echo -e "Governor Middle core: \e[01;37m${CUR_GOVERNOR[1]}\e[00;37m"
+				$busybox echo -e "Governor big core:    \e[01;37m${CUR_GOVERNOR[2]}\e[00;37m"
+			else
+				$busybox echo -e "Governor LITTLE core: \e[01;37m${CUR_GOVERNOR[2]}\e[00;37m"
+				$busybox echo -e "Governor Middle core: \e[01;37m${CUR_GOVERNOR[1]}\e[00;37m"
+				$busybox echo -e "Governor big core:    \e[01;37m${CUR_GOVERNOR[0]}\e[00;37m"
+			fi
+		else
+			#For 2 CPU
+			if [ $IN -eq 0 ]; then
+				$busybox echo -e "Governor LITTLE core: \e[01;37m${CUR_GOVERNOR[0]}\e[00;37m"
+				$busybox echo -e "Governor big core:    \e[01;37m${CUR_GOVERNOR[1]}\e[00;37m"
+			else
+				$busybox echo -e "Governor LITTLE core: \e[01;37m${CUR_GOVERNOR[1]}\e[00;37m"
+				$busybox echo -e "Governor big core:    \e[01;37m${CUR_GOVERNOR[0]}\e[00;37m"
+			fi
+		fi
+	else
+		#For Regular or Cluster
+		$busybox echo -e "bigLITTLE: not present"
+		$busybox echo ""
+		if [ ${#CLUSTER[@]} -eq 2 ]; then
+			$busybox echo -e "Governor CPU1: \e[01;37m${CUR_GOVERNOR[0]}\e[00;37m"
+			$busybox echo -e "Governor CPU2: \e[01;37m${CUR_GOVERNOR[1]}\e[00;37m"
+		else
+			$busybox echo -e "Governor: \e[01;37m${CUR_GOVERNOR[0]}\e[00;37m"
+		fi
+	fi
 
-u|U)$busybox clear
-$busybox mount -o remount,rw /system 2>/dev/null
-mount -o remount,rw /system 2>/dev/null
-OUTPUT_ID=$($busybox cat /data/system/test);
-kill -9 $OUTPUT_ID
-echo "Removing files"
-$busybox sleep 0.5
-echo "Killing process"
-$busybox sleep 0.5
-if [ -e $PROFILE_DIR/GovTuner_battery ]; then
-	$busybox rm -rf $PROFILE_DIR/GovTuner_battery
-fi
-if [ -e $PROFILE_DIR/GovTuner_balanced ]; then
-	$busybox rm -rf $PROFILE_DIR/GovTuner_balanced
-fi
-if [ -e $PROFILE_DIR/GovTuner_performance ]; then
-	$busybox rm -rf $PROFILE_DIR/GovTuner_performance
-fi
-if [ -e $PROFILE_DIR/profile ]; then
-	$busybox rm -rf $PROFILE_DIR/profile
-fi
-echo 1 > $FIRST_RUN
-$busybox echo "Governor_Tuner Disabled"
-$busybox sleep 0.5
-$busybox clear;;
+	$busybox echo ""
+	$busybox echo -e "Device: \e[01;37m${DEVICE}\e[00;37m"
+	$busybox echo ""
+	$busybox echo -e "Android Version: \e[01;37m${VER}\e[00;37m"
+	$busybox echo ""
+	$busybox echo -e "Govtuner Version: \e[01;37m$ver\e[00;37m"
+	$busybox echo ""
+	if [ $bigLITTLE -eq 1 ]; then
+		if [ "$CD" -eq 3 ]; then
+			Show_freq[0]=0
+			break 1
+		fi
+		if [ ${#CLUSTER[@]} -eq 3 ]; then
+			#For 3 CPU
+			if [ $IN -eq 0 ]; then
+				if [ ${MAX_FREQ[0]} -gt ${MIN_FREQ[0]} ]; then
+					Show_freq[0]=1
+					$busybox echo -e "CPU LITTLE Min/Max: \e[01;37m${MIN_FREQ[0]} MHz\e[00;37m / \e[01;37m${MAX_FREQ[0]} MHz\e[00;37m"
+				fi
+				if [ ${MAX_FREQ[0]} -lt ${MIN_FREQ[0]} ]; then
+					Show_freq[0]=1
+					$busybox echo -e "CPU LITTLE Min/Max: \e[01;37m${MAX_FREQ[0]} MHz\e[00;37m / \e[01;37m${MIN_FREQ[0]} MHz\e[00;37m"
+				fi
+				if [ ${MAX_FREQ[1]} -gt ${MIN_FREQ[1]} ]; then
+					Show_freq[1]=1
+					$busybox echo -e "CPU Middle Min/Max: \e[01;37m${MIN_FREQ[1]} MHz\e[00;37m / \e[01;37m${MAX_FREQ[1]} MHz\e[00;37m"
+				fi
+				if [ ${MAX_FREQ[1]} -lt ${MIN_FREQ[1]} ]; then
+					Show_freq[1]=1
+					$busybox echo -e "CPU Middle Min/Max: \e[01;37m${MAX_FREQ[1]} MHz\e[00;37m / \e[01;37m${MIN_FREQ[1]} MHz\e[00;37m"
+				fi
+				if [ ${MAX_FREQ[2]} -gt ${MIN_FREQ[2]} ]; then
+					Show_freq[2]=1
+					$busybox echo -e "CPU big Min/Max:    \e[01;37m${MIN_FREQ[2]} MHz\e[00;37m / \e[01;37m${MAX_FREQ[2]} MHz\e[00;37m"
+				fi
+				if [ ${MAX_FREQ[2]} -lt ${MIN_FREQ[2]} ]; then
+					Show_freq[2]=1
+					$busybox echo -e "CPU big Min/Max:    \e[01;37m${MAX_FREQ[2]} MHz\e[00;37m / \e[01;37m${MIN_FREQ[2]} MHz\e[00;37m"
+				fi
+			else
+				if [ ${MAX_FREQ[2]} -gt ${MIN_FREQ[2]} ]; then
+					Show_freq[2]=1
+					$busybox echo -e "CPU LITTLE Min/Max: \e[01;37m${MIN_FREQ[2]} MHz\e[00;37m / \e[01;37m${MAX_FREQ[2]} MHz\e[00;37m"
+				fi
+				if [ ${MAX_FREQ[2]} -lt ${MIN_FREQ[2]} ]; then
+					Show_freq[2]=1
+					$busybox echo -e "CPU LITTLE Min/Max: \e[01;37m${MAX_FREQ[2]} MHz\e[00;37m / \e[01;37m${MIN_FREQ[2]} MHz\e[00;37m"
+				fi
+				if [ ${MAX_FREQ[1]} -gt ${MIN_FREQ[1]} ]; then
+					Show_freq[1]=1
+					$busybox echo -e "CPU Middle Min/Max: \e[01;37m${MIN_FREQ[1]} MHz\e[00;37m / \e[01;37m${MAX_FREQ[1]} MHz\e[00;37m"
+				fi
+				if [ ${MAX_FREQ[1]} -lt ${MIN_FREQ[1]} ]; then
+					Show_freq[1]=1
+					$busybox echo -e "CPU Middle Min/Max: \e[01;37m${MAX_FREQ[1]} MHz\e[00;37m / \e[01;37m${MIN_FREQ[1]} MHz\e[00;37m"
+				fi
+				if [ ${MAX_FREQ[0]} -gt ${MIN_FREQ[0]} ]; then
+					Show_freq[0]=1
+					$busybox echo -e "CPU big Min/Max:    \e[01;37m${MIN_FREQ[0]} MHz\e[00;37m / \e[01;37m${MAX_FREQ[0]} MHz\e[00;37m"
+				fi
+				if [ ${MAX_FREQ[0]} -lt ${MIN_FREQ[0]} ]; then
+					Show_freq[0]=1
+					$busybox echo -e "CPU big Min/Max:    \e[01;37m${MAX_FREQ[0]} MHz\e[00;37m / \e[01;37m${MIN_FREQ[0]} MHz\e[00;37m"
+				fi
+			fi
+			if [ "${Show_freq[0]}" -eq 0 ] || [ "${Show_freq[1]}" -eq 0 ] || [ "${Show_freq[2]}" -eq 0 ]; then
+				break 1
+			fi
+		else
+			#For 2 CPU
+			if [ $IN -eq 0 ]; then
+				if [ ${MAX_FREQ[0]} -gt ${MIN_FREQ[0]} ]; then
+					Show_freq[0]=1
+					$busybox echo -e "CPU LITTLE Min/Max: \e[01;37m${MIN_FREQ[0]} MHz\e[00;37m / \e[01;37m${MAX_FREQ[0]} MHz\e[00;37m"
+				fi
+				if [ ${MAX_FREQ[0]} -lt ${MIN_FREQ[0]} ]; then
+					Show_freq[0]=1
+					$busybox echo -e "CPU LITTLE Min/Max: \e[01;37m${MAX_FREQ[0]} MHz\e[00;37m / \e[01;37m${MIN_FREQ[0]} MHz\e[00;37m"
+				fi
+				if [ ${MAX_FREQ[1]} -gt ${MIN_FREQ[1]} ]; then
+					Show_freq[1]=1
+					$busybox echo -e "CPU big Min/Max:    \e[01;37m${MIN_FREQ[1]} MHz\e[00;37m / \e[01;37m${MAX_FREQ[1]} MHz\e[00;37m"
+				fi
+				if [ ${MAX_FREQ[1]} -lt ${MIN_FREQ[1]} ]; then
+					Show_freq[1]=1
+					$busybox echo -e "CPU big Min/Max:    \e[01;37m${MAX_FREQ[1]} MHz\e[00;37m / \e[01;37m${MIN_FREQ[1]} MHz\e[00;37m"
+				fi
+			else
+				if [ ${MAX_FREQ[1]} -gt ${MIN_FREQ[1]} ]; then
+					Show_freq[1]=1
+					$busybox echo -e "CPU LITTLE Min/Max: \e[01;37m${MIN_FREQ[1]} MHz\e[00;37m / \e[01;37m${MAX_FREQ[1]} MHz\e[00;37m"
+				fi
+				if [ ${MAX_FREQ[1]} -lt ${MIN_FREQ[1]} ]; then
+					Show_freq[1]=1
+					$busybox echo -e "CPU LITTLE Min/Max: \e[01;37m${MAX_FREQ[1]} MHz\e[00;37m / \e[01;37m${MIN_FREQ[1]} MHz\e[00;37m"
+				fi
+				if [ ${MAX_FREQ[0]} -gt ${MIN_FREQ[0]} ]; then
+					Show_freq[0]=1
+					$busybox echo -e "CPU big Min/Max:    \e[01;37m${MIN_FREQ[0]} MHz\e[00;37m / \e[01;37m${MAX_FREQ[0]} MHz\e[00;37m"
+				fi
+				if [ ${MAX_FREQ[0]} -lt ${MIN_FREQ[0]} ]; then
+					Show_freq[0]=1
+					$busybox echo -e "CPU big Min/Max:    \e[01;37m${MAX_FREQ[0]} MHz\e[00;37m / \e[01;37m${MIN_FREQ[0]} MHz\e[00;37m"
+				fi
+			fi
+			if [ "${Show_freq[0]}" -eq 0 ] || [ "${Show_freq[1]}" -eq 0 ]; then
+				break 1
+			fi
+		fi
+	else
+		if [ $CD -eq 1 ] && [ ${#CLUSTER[@]} -eq 2 ]; then
+				#For Cluster
+				if [ ${MAX_FREQ[0]} -gt ${MIN_FREQ[0]} ]; then
+					Show_freq[0]=1
+					$busybox echo -e "CPU1 Min/Max: \e[01;37m${MIN_FREQ[0]} MHz\e[00;37m / \e[01;37m${MAX_FREQ[0]} MHz\e[00;37m"
+				fi
+				if [ ${MAX_FREQ[0]} -lt ${MIN_FREQ[0]} ]; then
+					Show_freq[0]=1
+					$busybox echo -e "CPU1 Min/Max: \e[01;37m${MAX_FREQ[0]} MHz\e[00;37m / \e[01;37m${MIN_FREQ[0]} MHz\e[00;37m"
+				fi
+				if [ ${MAX_FREQ[1]} -gt ${MIN_FREQ[1]} ]; then
+					Show_freq[1]=1
+					$busybox echo -e "CPU2 Min/Max: \e[01;37m${MIN_FREQ[1]} MHz\e[00;37m / \e[01;37m${MAX_FREQ[1]} MHz\e[00;37m"
+				fi
+				if [ ${MAX_FREQ[1]} -lt ${MIN_FREQ[1]} ]; then
+					Show_freq[1]=1
+					$busybox echo -e "CPU2 Min/Max: \e[01;37m${MAX_FREQ[1]} MHz\e[00;37m / \e[01;37m${MIN_FREQ[1]} MHz\e[00;37m"
+				fi
+				if [ "${Show_freq[0]}" -eq 0 ] || [ "${Show_freq[1]}" -eq 0 ]; then
+					break 1
+				fi
+		elif [ "$CD" -eq 1 ] && [ ${#CLUSTER[@]} -eq 1 ]; then
+			#For Cluster
+			if [ ${MAX_FREQ[0]} -gt ${MIN_FREQ[0]} ]; then
+				Show_freq[0]=1
+				$busybox echo -e "CPU Min: \e[01;37m${MIN_FREQ[0]} MHz\e[00;37m"
+				$busybox echo -e "CPU Max: \e[01;37m${MAX_FREQ[0]} MHz\e[00;37m"
+			fi
+			if [ ${MAX_FREQ[0]} -lt ${MIN_FREQ[0]} ]; then
+				Show_freq[0]=1
+				$busybox echo -e "CPU Min: \e[01;37m${MAX_FREQ[0]} MHz\e[00;37m"
+				$busybox echo -e "CPU Max: \e[01;37m${MIN_FREQ[0]} MHz\e[00;37m"
+			fi
+			if [ "${Show_freq[0]}" -eq 0 ]; then
+				break 1
+			fi
+		else
+			if [ "$CD" -eq 0 ] && [ "$CD" -ne 1 ]; then
+				#For Regular
+				if [ "$SF" -eq 1 ]; then
+					UFREQ[0]=$($busybox awk '{print $NF}' ${FREQ_SOURCE[0]});
+					LFREQ[0]=$($busybox awk -v 1=$1 '{print $1}' ${FREQ_SOURCE[0]});
+					Show_freq[0]=1
+				fi
+				if [ "$SF" -eq 0 ] && [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq ]; then
+					UFREQ[0]=$($busybox cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq);
+					LFREQ[0]=$($busybox cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq);
+					Show_freq[0]=1
+				fi
+				if [ ! -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq ] && [ "$SF" -eq 0 ]; then
+					Show_freq[0]=0
+				fi
+				if [ "${Show_freq[0]}" -eq 0 ]; then
+					$busybox echo ""
+					$busybox echo $divider
+				fi
+				if [ "${Show_freq[0]}" -eq 1 ]; then
+					MAX_FREQ[0]=$((${UFREQ[0]} / 1000));
+					MIN_FREQ[0]=$((${LFREQ[0]} / 1000));
+				fi
+				if [ ${MAX_FREQ[0]} -gt ${MIN_FREQ[0]} ]; then
+					$busybox echo -e "CPU Min: \e[01;37m${MIN_FREQ[0]} MHz\e[00;37m"
+					$busybox echo -e "CPU Max: \e[01;37m${MAX_FREQ[0]} MHz\e[00;37m"
+				elif [ ${MAX_FREQ[0]} -lt ${MIN_FREQ[0]} ]; then
+					$busybox echo -e "CPU Min: \e[01;37m${MAX_FREQ[0]} MHz\e[00;37m"
+					$busybox echo -e "CPU Max: \e[01;37m${MIN_FREQ[0]} MHz\e[00;37m"
+				else
+					sleep 0.2
+				fi
+			fi
+		fi
+	fi
+	$busybox echo ""
+	$busybox echo $divider
+	$busybox echo "        -Please choose a profile-"
+	$busybox echo $divider
+	$busybox echo -e "\e[01;31m     1 - Battery \e[00;37m"
+	$busybox echo ""
+	$busybox echo -e "\e[01;36m     2 - Balanced \e[00;37m"
+	$busybox echo ""
+	$busybox echo -e "\e[01;34m     3 - Performance \e[00;37m"
+	$busybox echo $divider
+	a=0
+	for i in ${CUR_GOVERNOR[@]}; do
+		if [ $i = "zzmoove" ]; then
+			if [ "$CD" -eq 1 ] && [ "$CD" -ne 0 ]; then
+				if [ ${GOVERNOR[$a]}/disable_hotplug ]; then
+					HOTPLUG=$($busybox cat ${GOVERNOR[$a]}/disable_hotplug)
+					$busybox echo "--- Zzmoove hotplug found , please choose ---"
+					$busybox echo -e "\e[01;37m s. Stock Hotplug"
+					$busybox echo -e "\e[01;37m z. Zzmoove Hotplug"
+					$busybox echo "---"
+				fi
+			fi
+			if [ "$CD" -eq 0 ] && [ "$CD" -ne 1 ]; then
+				if [ /sys/devices/system/cpu/cpufreq/zzmoove/disable_hotplug ]; then
+					HOTPLUG=$($busybox cat /sys/devices/system/cpu/cpufreq/zzmoove/disable_hotplug)
+					$busybox echo "--- Zzmoove hotplug found , please choose ---"
+					$busybox echo -e "\e[01;37m s. Stock Hotplug"
+					$busybox echo -e "\e[01;37m z. Zzmoove Hotplug"
+					$busybox echo "---"
+				fi
+			fi
+		fi
+		a=$(($a + 1))
+	done
+	$busybox echo -e "\e[01;37m g. Change Governor \e[00;37m"
+	$busybox echo -e "\e[01;37m u. Disable GovTuner \e[00;37m"
+	$busybox echo -e "\e[01;37m c. Changelog \e[00;37m"
+	if [ -e "/sys/module/workqueue/parameters/power_efficient" ]; then
+		if [ $($busybox cat /sys/module/workqueue/parameters/power_efficient) = "N" ]; then
+			$busybox echo -e "\e[01;31m p.\e[00;37m \e[01;37mPower efficient \e[00;37m"
+		elif [ $($busybox cat /sys/module/workqueue/parameters/power_efficient) = "Y" ]; then
+			$busybox echo -e "\e[01;32m p.\e[00;37m \e[01;37mPower efficient \e[00;37m"
+		fi
+	fi
+	$busybox echo -e "\e[01;37m t. Tuned Parameters \e[00;37m"
+	$busybox echo " e. Exit"
+	$busybox echo $divider
+	if [ -s /data/system/test ]; then
+		OUTPUT_ID=$($busybox cat /data/system/test);
+		if ps | $busybox grep "$OUTPUT_ID"; then
+			echo -e "\e[01;37m GovTuner\e[00;37m: \e[01;32m ACTIVE \e[00;37m"
+		else
+			echo -e "\e[01;37m GovTuner\e[00;37m: \e[01;31m INACTIVE \e[00;37m"
+		fi
+	fi
+	$busybox echo ""
+	if [ -f "$INIT_TEST" ]; then
+		echo -e "\e[01;37m Init.d \e[00;37m : \e[01;32m WORKING \e[00;37m"
+	else
+		echo -e "\e[01;37m Init.d \e[00;37m : \e[01;31m NOT WORKING \e[00;37m"
+		$busybox echo -e "\e[01;37m If you use 3rd party init.d emulators, as Kernel Adiutor init.d emulator, it's fine as well, it just won't show up here as active \e[00;37m"
+	fi
+	$busybox echo ""
+	$busybox echo -n "Please select a profile:"
+	read -r character
+	case $character in
+		1)
+			$busybox clear
+			$busybox echo ""
+			$busybox echo "Activating battery profile"
+			$busybox sleep 0.3
+			if [ ! -f "$CHECK2" ]; then
+				echo 1 > $FIRST_RUN
+			else
+				echo 0 > $FIRST_RUN
+			fi
+			$busybox echo ""
+			$busybox sleep 0.2
+			$busybox echo "Copying battery profile to init.d"
+			$busybox sleep 0.3
+			$busybox echo ""
+			$busybox mount -o remount,rw /system 2>/dev/null
+			mount -o remount,rw /system 2>/dev/null
+			if [ -e $PROFILE_DIR/GovTuner_balanced ]; then
+				$busybox rm -rf $PROFILE_DIR/GovTuner_balanced
+			fi
+			if [ -e $PROFILE_DIR/GovTuner_performance ]; then
+				$busybox rm -rf $PROFILE_DIR/GovTuner_performance
+			fi
+			$busybox cp -f $core/profiles/GovTuner_battery $PROFILE_DIR/GovTuner_battery
+			$busybox chmod 755 $PROFILE_DIR/GovTuner_battery
+			$busybox echo "Applying battery tweaks"
+			$busybox sleep 0.4
+			$busybox echo ""
+			$busybox setsid $PROFILE_DIR/GovTuner_battery&
+			$busybox sleep 0.3
+			$busybox echo ""
+			$busybox sleep 5
+			$busybox clear
+			$busybox echo "GovTuner battery profile activated"
+			$busybox echo ""
+			$busybox echo ""
+			$busybox sleep 1
+			$busybox clear
+		;;
 
-c|C)$busybox clear;
-sh $core/Changelogs;;
-e|E)$busybox clear;
-$busybox mount -o remount,ro /system 2>/dev/null
-exit;;
-*)$busybox clear;
-$busybox echo "Invalid option, please try again"
-$busybox sleep 1
-exit
-esac
+		2)
+			$busybox clear
+			$busybox echo ""
+			$busybox echo "Activating balanced profile"
+			$busybox sleep 0.3
+			$busybox echo ""
+			if [ ! -f "$CHECK2" ]; then
+				echo 1 > $FIRST_RUN
+			else
+				echo 0 > $FIRST_RUN
+			fi
+			$busybox sleep 0.2
+			$busybox echo "Copying balanced profile to init.d"
+			$busybox sleep 0.3
+			$busybox echo ""
+			$busybox mount -o remount,rw /system 2>/dev/null
+			mount -o remount,rw /system 2>/dev/null
+			if [ -e $PROFILE_DIR/GovTuner_battery ]; then
+				$busybox rm -rf $PROFILE_DIR/GovTuner_battery
+			fi
+			if [ -e $PROFILE_DIR/GovTuner_performance ]; then
+				$busybox rm -rf $PROFILE_DIR/GovTuner_performance
+			fi
+			$busybox cp -f $core/profiles/GovTuner_balanced $PROFILE_DIR/GovTuner_balanced
+			$busybox chmod 755 $PROFILE_DIR/GovTuner_balanced
+			$busybox echo "Applying balanced tweaks"
+			$busybox sleep 0.4
+			$busybox echo ""
+			$busybox setsid $PROFILE_DIR/GovTuner_balanced&
+			$busybox sleep 0.3
+			$busybox echo ""
+			$busybox sleep 5
+			$busybox clear
+			$busybox echo "GovTuner balanced profile activated"
+			$busybox echo ""
+			$busybox echo ""
+			$busybox sleep 1
+			$busybox clear
+		;;
+
+		3)
+			$busybox clear
+			$busybox echo ""
+			$busybox echo "Activating performance profile"
+			$busybox sleep 0.3
+			$busybox echo ""
+			if [ ! -f "$CHECK2" ]; then
+				echo 1 > $FIRST_RUN
+			else
+				echo 0 > $FIRST_RUN
+			fi
+			$busybox sleep 0.2
+			$busybox echo "Copying performance profile to init.d"
+			$busybox sleep 0.3
+			$busybox echo ""
+			$busybox mount -o remount,rw /system 2>/dev/null
+			mount -o remount,rw /system 2>/dev/null
+			if [ -e $PROFILE_DIR/GovTuner_battery ]; then
+				$busybox rm -rf $PROFILE_DIR/GovTuner_battery
+			fi
+			if [ -e $PROFILE_DIR/GovTuner_balanced ]; then
+				$busybox rm -rf $PROFILE_DIR/GovTuner_balanced
+			fi
+			$busybox cp -f $core/profiles/GovTuner_performance $PROFILE_DIR/GovTuner_performance
+			$busybox chmod 755 $PROFILE_DIR/GovTuner_performance
+			$busybox echo "Applying performance tweaks"
+			$busybox sleep 0.4
+			$busybox echo ""
+			$busybox setsid $PROFILE_DIR/GovTuner_performance&
+			$busybox sleep 0.3
+			$busybox echo ""
+			$busybox sleep 5
+			$busybox clear
+			$busybox echo "GovTuner performance profile activated"
+			$busybox echo ""
+			$busybox echo ""
+			$busybox sleep 1
+			$busybox clear
+		;;
+
+		s|S)
+			$busybox clear;
+			$busybox echo "Enabling stock hotplug"
+			sleep 2
+			c=0
+			for i in ${CUR_GOVERNOR[@]}; do
+			    if [ $i = "zzmoove" ]; then
+			      if [ "$CD" -eq 1 ] && [ "$CD" -ne 0 ]; then
+			        if [ ${GOVERNOR[$c]}/disable_hotplug ]; then
+				        echo 1 > ${GOVERNOR[$c]}/disable_hotplug
+				    fi
+			      fi
+			      if [ "$CD" -eq 0 ] && [ "$CD" -ne 1 ]; then
+			       if [ /sys/devices/system/cpu/cpufreq/zzmoove/disable_hotplug ]; then
+				      echo 1 > /sys/devices/system/cpu/cpufreq/zzmoove/disable_hotplug
+				   fi
+			      fi
+				fi
+				c=$(($c + 1))
+			done
+		;;
+			
+		z|Z)
+			$busybox clear;
+			$busybox echo "Enabling zzmoove hotplug"
+			sleep 2
+			d=0
+	        for i in ${CUR_GOVERNOR[@]}; do
+		        if [ $i = "zzmoove" ]; then
+			      if [ "$CD" -eq 1 ] && [ "$CD" -ne 0 ]; then
+			        if [ ${GOVERNOR[$d]}/disable_hotplug ]; then
+				        echo 0 > ${GOVERNOR[$d]}/disable_hotplug
+				    fi
+			      fi
+			      if [ "$CD" -eq 0 ] && [ "$CD" -ne 1 ]; then
+			       if [ /sys/devices/system/cpu/cpufreq/zzmoove/disable_hotplug ]; then
+				      echo 0 > /sys/devices/system/cpu/cpufreq/zzmoove/disable_hotplug
+				   fi
+			      fi
+				fi
+				d=$(($d + 1))
+	        done
+		;;
+
+		g|G)
+			$busybox clear
+			$busybox echo ""
+			if [ $bigLITTLE -eq 1 ]; then
+				#For bigLITTLE
+				if [ ${#CLUSTER[@]} -eq 3 ]; then
+					#For triple cluster
+					$busybox echo -e "Select the core group:";
+					$busybox echo ""
+					$busybox echo -e "\e[01;37m 1. LITTLE core \e[00;37m";
+					$busybox echo -e "\e[01;37m 2. Middle core \e[00;37m";
+					$busybox echo -e "\e[01;37m 3. big core \e[00;37m";
+					read -r c
+					case $c in
+						1)
+							$busybox clear
+							$busybox echo ""
+							if [ $IN -eq 0 ]; then
+								$busybox echo -e "Actual governor: \e[01;37m${CUR_GOVERNOR[0]}\e[00;37m";
+								$busybox echo ""
+								$busybox echo "Available governor for LITTLE core:";
+								$busybox echo -e "\e[01;37m${AVAILABLE_GOVERNORS[0]}\e[00;37m";
+							else
+								$busybox echo -e "Actual governor: \e[01;37m${CUR_GOVERNOR[2]}\e[00;37m";
+								$busybox echo ""
+								$busybox echo "Available governor for LITTLE core:";
+								$busybox echo -e "\e[01;37m${AVAILABLE_GOVERNORS[2]}\e[00;37m";
+							fi
+							$busybox echo ""
+							$busybox echo "choose one of these.";
+							read -r GOV
+							if [ $IN -eq 0 ]; then
+								for i in ${AVAILABLE_GOVERNORS[0]}; do
+									if [ "$GOV" = "$i" ]; then
+										$busybox echo "change governor in progress..."
+										chmod 644 /sys/devices/system/cpu/cpu$LITTLE_CORE/cpufreq/scaling_governor
+										$busybox echo "$GOV" > "/sys/devices/system/cpu/cpu$LITTLE_CORE/cpufreq/scaling_governor";
+										$busybox sleep 3
+										$busybox clear
+										$busybox echo "done"
+										$busybox sleep 2
+										$busybox clear
+										$busybox echo -e "Actual governor: \e[01;37m$($busybox cat /sys/devices/system/cpu/cpu$LITTLE_CORE/cpufreq/scaling_governor)\e[00;37m"
+										$busybox sleep 2
+										$busybox clear
+										g=1
+										break
+									else
+										g=0
+									fi
+								done
+							else
+								for i in ${AVAILABLE_GOVERNORS[2]}; do
+									if [ "$GOV" = "$i" ]; then
+										$busybox echo "change governor in progress..."
+										chmod 644 /sys/devices/system/cpu/cpu$LITTLE_CORE/cpufreq/scaling_governor
+										$busybox echo "$GOV" > "/sys/devices/system/cpu/cpu$LITTLE_CORE/cpufreq/scaling_governor";
+										$busybox sleep 3
+										$busybox clear
+										$busybox echo "done"
+										$busybox sleep 2
+										$busybox clear
+										$busybox echo -e "Actual governor: \e[01;37m$($busybox cat /sys/devices/system/cpu/cpu$LITTLE_CORE/cpufreq/scaling_governor)\e[00;37m"
+										$busybox sleep 2
+										$busybox clear
+										g=1
+										break
+									else
+										g=0
+									fi
+								done
+							fi
+							if [ "$g" -eq 0 ]; then
+								$busybox clear
+								$busybox echo "Invalid option, please try again";
+								$busybox sleep 1
+								exit
+							fi
+						;;
+						2)
+							$busybox clear
+							$busybox echo ""
+							$busybox echo -e "Actual governor: \e[01;37m${CUR_GOVERNOR[1]}\e[00;37m";
+							$busybox echo ""
+							$busybox echo "Available governor for Middle core:";
+							$busybox echo -e "\e[01;37m${AVAILABLE_GOVERNORS[1]}\e[00;37m";
+							$busybox echo ""
+							$busybox echo "choose one of these.";
+							read -r GOV
+							for i in ${AVAILABLE_GOVERNORS[1]}; do
+								if [ "$GOV" = "$i" ]; then
+									$busybox echo "change governor in progress..."
+									chmod 644 /sys/devices/system/cpu/cpu$MIDDLE_CORE/cpufreq/scaling_governor
+									$busybox echo "$GOV" > "/sys/devices/system/cpu/cpu$MIDDLE_CORE/cpufreq/scaling_governor";
+									$busybox sleep 3
+									$busybox clear
+									$busybox echo "done"
+									$busybox sleep 2
+									$busybox clear
+									$busybox echo -e "Actual governor: \e[01;37m$($busybox cat /sys/devices/system/cpu/cpu$MIDDLE_CORE/cpufreq/scaling_governor)\e[00;37m"
+									$busybox sleep 2
+									$busybox clear
+									g=1
+									break
+								else
+									g=0
+								fi
+							done
+							if [ "$g" -eq 0 ]; then
+								$busybox clear;
+								$busybox echo "Invalid option, please try again";
+								$busybox sleep 1
+								exit
+							fi
+						;;
+						3)
+							$busybox clear
+							$busybox echo ""
+							if [ $IN -eq 0 ]; then
+								$busybox echo -e "Actual governor: \e[01;37m${CUR_GOVERNOR[2]}\e[00;37m";
+								$busybox echo ""
+								$busybox echo "Available governor for big core:";
+								$busybox echo -e "\e[01;37m${AVAILABLE_GOVERNORS[2]}\e[00;37m";
+							else
+								$busybox echo -e "Actual governor: \e[01;37m${CUR_GOVERNOR[0]}\e[00;37m";
+								$busybox echo ""
+								$busybox echo "Available governor for big core:";
+								$busybox echo -e "\e[01;37m${AVAILABLE_GOVERNORS[0]}\e[00;37m";
+							fi
+							$busybox echo ""
+							$busybox echo "choose one of these.";
+							read -r GOV
+							if [ $IN -eq 0 ]; then
+								for i in ${AVAILABLE_GOVERNORS[2]}; do
+									if [ "$GOV" = "$i" ]; then
+										$busybox echo "change governor in progress..."
+										chmod 644 /sys/devices/system/cpu/cpu$BIG_CORE/cpufreq/scaling_governor
+										$busybox echo "$GOV" > "/sys/devices/system/cpu/cpu$BIG_CORE/cpufreq/scaling_governor";
+										$busybox sleep 3
+										$busybox clear
+										$busybox echo "done"
+										$busybox sleep 2
+										$busybox clear
+										$busybox echo -e "Actual governor: \e[01;37m$($busybox cat /sys/devices/system/cpu/cpu$BIG_CORE/cpufreq/scaling_governor)\e[00;37m"
+										$busybox sleep 2
+										$busybox clear
+										g=1
+										break
+									else
+										g=0
+									fi
+								done
+							else
+								for i in ${AVAILABLE_GOVERNORS[0]}; do
+									if [ "$GOV" = "$i" ]; then
+										$busybox echo "change governor in progress..."
+										chmod 644 /sys/devices/system/cpu/cpu$BIG_CORE/cpufreq/scaling_governor
+										$busybox echo "$GOV" > "/sys/devices/system/cpu/cpu$BIG_CORE/cpufreq/scaling_governor";
+										$busybox sleep 3
+										$busybox clear
+										$busybox echo "done"
+										$busybox sleep 2
+										$busybox clear
+										$busybox echo -e "Actual governor: \e[01;37m$($busybox cat /sys/devices/system/cpu/cpu$BIG_CORE/cpufreq/scaling_governor)\e[00;37m"
+										$busybox sleep 2
+										$busybox clear
+										g=1
+										break
+									else
+										g=0
+									fi
+								done
+							fi
+							if [ "$g" -eq 0 ]; then
+								$busybox clear;
+								$busybox echo "Invalid option, please try again";
+								$busybox sleep 1
+								exit
+							fi
+						;;
+						*)
+							$busybox clear;
+							$busybox echo "Invalid option, please try again";
+							$busybox sleep 1
+							exit
+						;;
+					esac
+				else
+					#For dual cluster
+					$busybox echo -e "Select the core group:";
+					$busybox echo ""
+					$busybox echo -e "\e[01;37m 1. LITTLE core \e[00;37m";
+					$busybox echo -e "\e[01;37m 2. big core \e[00;37m";
+					read -r c
+					case $c in
+						1)
+							$busybox clear
+							$busybox echo ""
+							if [ $IN -eq 0 ]; then
+								$busybox echo -e "Actual governor: \e[01;37m${CUR_GOVERNOR[0]}\e[00;37m";
+								$busybox echo ""
+								$busybox echo "Available governor for LITTLE core:";
+								$busybox echo -e "\e[01;37m${AVAILABLE_GOVERNORS[0]}\e[00;37m";
+							else
+								$busybox echo -e "Actual governor: \e[01;37m${CUR_GOVERNOR[1]}\e[00;37m";
+								$busybox echo ""
+								$busybox echo "Available governor for LITTLE core:";
+								$busybox echo -e "\e[01;37m${AVAILABLE_GOVERNORS[1]}\e[00;37m";
+							fi
+							$busybox echo ""
+							$busybox echo "choose one of these.";
+							read -r GOV
+							if [ $IN -eq 0 ]; then
+								for i in ${AVAILABLE_GOVERNORS[0]}; do
+									if [ "$GOV" = "$i" ]; then
+										$busybox echo "change governor in progress..."
+										chmod 644 /sys/devices/system/cpu/cpu$LITTLE_CORE/cpufreq/scaling_governor
+										$busybox echo "$GOV" > "/sys/devices/system/cpu/cpu$LITTLE_CORE/cpufreq/scaling_governor";
+										$busybox sleep 3
+										$busybox clear
+										$busybox echo "done"
+										$busybox sleep 2
+										$busybox clear
+										$busybox echo -e "Actual governor: \e[01;37m$($busybox cat /sys/devices/system/cpu/cpu$LITTLE_CORE/cpufreq/scaling_governor)\e[00;37m"
+										$busybox sleep 2
+										$busybox clear
+										g=1
+										break
+									else
+										g=0
+									fi
+								done
+							else
+								for i in ${AVAILABLE_GOVERNORS[1]}; do
+									if [ "$GOV" = "$i" ]; then
+										$busybox echo "change governor in progress..."
+										chmod 644 /sys/devices/system/cpu/cpu$LITTLE_CORE/cpufreq/scaling_governor
+										$busybox echo "$GOV" > "/sys/devices/system/cpu/cpu$LITTLE_CORE/cpufreq/scaling_governor";
+										$busybox sleep 3
+										$busybox clear
+										$busybox echo "done"
+										$busybox sleep 2
+										$busybox clear
+										$busybox echo -e "Actual governor: \e[01;37m$($busybox cat /sys/devices/system/cpu/cpu$LITTLE_CORE/cpufreq/scaling_governor)\e[00;37m"
+										$busybox sleep 2
+										$busybox clear
+										g=1
+										break
+									else
+										g=0
+									fi
+								done
+							fi
+							if [ "$g" -eq 0 ]; then
+								$busybox clear
+								$busybox echo "Invalid option, please try again";
+								$busybox sleep 1
+								exit
+							fi
+						;;
+						2)
+							$busybox clear
+							$busybox echo ""
+							if [ $IN -eq 0 ]; then
+								$busybox echo -e "Actual governor: \e[01;37m${CUR_GOVERNOR[1]}\e[00;37m";
+								$busybox echo ""
+								$busybox echo "Available governor for big core:";
+								$busybox echo -e "\e[01;37m${AVAILABLE_GOVERNORS[1]}\e[00;37m";
+							else
+								$busybox echo -e "Actual governor: \e[01;37m${CUR_GOVERNOR[0]}\e[00;37m";
+								$busybox echo ""
+								$busybox echo "Available governor for big core:";
+								$busybox echo -e "\e[01;37m${AVAILABLE_GOVERNORS[0]}\e[00;37m";
+							fi
+							$busybox echo ""
+							$busybox echo "choose one of these.";
+							read -r GOV
+							if [ $IN -eq 0 ]; then
+								for i in ${AVAILABLE_GOVERNORS[1]}; do
+									if [ "$GOV" = "$i" ]; then
+										$busybox echo "change governor in progress..."
+										chmod 644 /sys/devices/system/cpu/cpu$BIG_CORE/cpufreq/scaling_governor
+										$busybox echo "$GOV" > "/sys/devices/system/cpu/cpu$BIG_CORE/cpufreq/scaling_governor";
+										$busybox sleep 3
+										$busybox clear
+										$busybox echo "done"
+										$busybox sleep 2
+										$busybox clear
+										$busybox echo -e "Actual governor: \e[01;37m$($busybox cat /sys/devices/system/cpu/cpu$BIG_CORE/cpufreq/scaling_governor)\e[00;37m"
+										$busybox sleep 2
+										$busybox clear
+										g=1
+										break
+									else
+										g=0
+									fi
+								done
+							else
+								for i in ${AVAILABLE_GOVERNORS[0]}; do
+									if [ "$GOV" = "$i" ]; then
+										$busybox echo "change governor in progress..."
+										chmod 644 /sys/devices/system/cpu/cpu$BIG_CORE/cpufreq/scaling_governor
+										$busybox echo "$GOV" > "/sys/devices/system/cpu/cpu$BIG_CORE/cpufreq/scaling_governor";
+										$busybox sleep 3
+										$busybox clear
+										$busybox echo "done"
+										$busybox sleep 2
+										$busybox clear
+										$busybox echo -e "Actual governor: \e[01;37m$($busybox cat /sys/devices/system/cpu/cpu$BIG_CORE/cpufreq/scaling_governor)\e[00;37m"
+										$busybox sleep 2
+										$busybox clear
+										g=1
+										break
+									else
+										g=0
+									fi
+								done
+							fi
+							if [ "$g" -eq 0 ]; then
+								$busybox clear;
+								$busybox echo "Invalid option, please try again";
+								$busybox sleep 1
+								exit
+							fi
+						;;
+						*)
+							$busybox clear;
+							$busybox echo "Invalid option, please try again";
+							$busybox sleep 1
+							exit
+						;;
+					esac
+				fi
+			else
+				if [ ${#CLUSTER[@]} -eq 2 ]; then
+					#For dual cluster
+					$busybox echo -e "Select the CPU:";
+					$busybox echo ""
+					$busybox echo -e "\e[01;37m 1. CPU1 \e[00;37m";
+					$busybox echo -e "\e[01;37m 2. CPU2 \e[00;37m";
+					read -r c
+					case $c in
+						1)
+							$busybox clear
+							$busybox echo ""
+							$busybox echo -e "Actual governor: \e[01;37m${CUR_GOVERNOR[0]}\e[00;37m";
+							$busybox echo ""
+							$busybox echo "Available governor:";
+							$busybox echo -e "\e[01;37m${AVAILABLE_GOVERNORS[0]}\e[00;37m";
+							$busybox echo ""
+							$busybox echo "choose one of these.";
+							read -r GOV
+							for i in ${AVAILABLE_GOVERNORS[0]}; do
+								if [ "$GOV" = "$i" ]; then
+									$busybox echo "change governor in progress..."
+									chmod 644 /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_governor
+									$busybox echo "$GOV" > "/sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_governor";
+									$busybox sleep 3
+									$busybox clear
+									$busybox echo "done"
+									$busybox sleep 2
+									$busybox clear
+									$busybox echo -e "Actual governor: \e[01;37m$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_governor)\e[00;37m"
+									$busybox sleep 2
+									$busybox clear
+									g=1
+									break
+								else
+									g=0
+								fi
+							done
+							if [ "$g" -eq 0 ]; then
+								$busybox clear;
+								$busybox echo "Invalid option, please try again";
+								$busybox sleep 1
+								exit
+							fi
+						;;
+						2)
+							$busybox clear
+							$busybox echo ""
+							$busybox echo -e "Actual governor: \e[01;37m${CUR_GOVERNOR[1]}\e[00;37m";
+							$busybox echo ""
+							$busybox echo "Available governor:";
+							$busybox echo -e "\e[01;37m${AVAILABLE_GOVERNORS[1]}\e[00;37m";
+							$busybox echo ""
+							$busybox echo "choose one of these.";
+							read -r GOV
+							for i in ${AVAILABLE_GOVERNORS[1]}; do
+								if [ "$GOV" = "$i" ]; then
+									$busybox echo "change governor in progress..."
+									chmod 644 /sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/scaling_governor
+									$busybox echo "$GOV" > "/sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/scaling_governor";
+									$busybox sleep 3
+									$busybox clear
+									$busybox echo "done"
+									$busybox sleep 2
+									$busybox clear
+									$busybox echo -e "Actual governor: \e[01;37m$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/scaling_governor)\e[00;37m"
+									$busybox sleep 2
+									$busybox clear
+									g=1
+									break
+								else
+									g=0
+								fi
+							done
+							if [ "$g" -eq 0 ]; then
+								$busybox clear;
+								$busybox echo "Invalid option, please try again";
+								$busybox sleep 1
+								exit
+							fi
+						;;
+					esac
+				else
+					if [ $CD -eq 1 ] && [ $CD -ne 0 ]; then
+						#For Cluster
+						$busybox clear
+						$busybox echo ""
+						$busybox echo -e "Actual governor: \e[01;37m${CUR_GOVERNOR[0]}\e[00;37m";
+						$busybox echo ""
+						$busybox echo "Available governor:";
+						$busybox echo -e "\e[01;37m${AVAILABLE_GOVERNORS[0]}\e[00;37m";
+						$busybox echo ""
+						$busybox echo "choose one of these.";
+						read -r GOV
+						for i in ${AVAILABLE_GOVERNORS[0]}; do
+							if [ "$GOV" = "$i" ]; then
+								$busybox echo "change governor in progress..."
+								chmod 644 /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_governor
+								$busybox echo "$GOV" > "/sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_governor";
+								$busybox sleep 3
+								$busybox clear
+								$busybox echo "done"
+								$busybox sleep 2
+								$busybox clear
+								$busybox echo -e "Actual governor: \e[01;37m$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_governor)\e[00;37m"
+								$busybox sleep 2
+								$busybox clear
+								g=1
+								break
+							else
+								g=0
+							fi
+						done
+						if [ "$g" -eq 0 ]; then
+							$busybox clear;
+							$busybox echo "Invalid option, please try again";
+							$busybox sleep 1
+							exit
+						fi
+					fi
+					if [ $CD -eq 0 ] && [ $CD -ne 1 ]; then
+						#For Regular
+						$busybox clear
+						$busybox echo ""
+						$busybox echo -e "Actual governor: \e[01;37m${CUR_GOVERNOR[0]}\e[00;37m";
+						$busybox echo ""
+						$busybox echo "Available governor:";
+						$busybox echo -e "\e[01;37m${AVAILABLE_GOVERNORS[0]}\e[00;37m";
+						$busybox echo ""
+						$busybox echo "choose one of these.";
+						read -r GOV
+						for i in ${AVAILABLE_GOVERNORS[0]}; do
+							if [ "$GOV" = "$i" ]; then
+								$busybox echo "change governor in progress..."
+								chmod 644 /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+								$busybox echo "$GOV" > "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor";
+								$busybox sleep 3
+								$busybox clear
+								$busybox echo "done"
+								$busybox sleep 2
+								$busybox clear
+								$busybox echo -e "Actual governor: \e[01;37m$($busybox cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)\e[00;37m"
+								$busybox sleep 2
+								$busybox clear
+								g=1
+								break
+							else
+								g=0
+							fi
+						done
+						if [ "$g" -eq 0 ]; then
+							$busybox clear;
+							$busybox echo "Invalid option, please try again";
+							$busybox sleep 1
+							exit
+						fi
+					fi
+				fi
+			fi
+			$busybox clear;
+		;;
+
+		u|U)
+			$busybox clear
+			$busybox mount -o remount,rw /system 2>/dev/null
+			mount -o remount,rw /system 2>/dev/null
+			OUTPUT_ID=$($busybox cat /data/system/test);
+			kill -9 $OUTPUT_ID
+			echo "Removing files"
+			$busybox sleep 0.5
+			echo "Killing process"
+			$busybox sleep 0.5
+			if [ -e $PROFILE_DIR/GovTuner_battery ]; then
+				$busybox rm -rf $PROFILE_DIR/GovTuner_battery
+			fi
+			if [ -e $PROFILE_DIR/GovTuner_balanced ]; then
+				$busybox rm -rf $PROFILE_DIR/GovTuner_balanced
+			fi
+			if [ -e $PROFILE_DIR/GovTuner_performance ]; then
+				$busybox rm -rf $PROFILE_DIR/GovTuner_performance
+			fi
+			if [ -e $PROFILE_DIR/profile ]; then
+				$busybox rm -rf $PROFILE_DIR/profile
+			fi
+			echo 1 > $FIRST_RUN
+			$busybox echo "Governor_Tuner Disabled"
+			$busybox sleep 0.5
+			$busybox clear
+		;;
+
+		c|C)
+			$busybox clear;
+			sh $core/Changelogs
+		;;
+
+		e|E)
+			$busybox clear;
+			$busybox mount -o remount,ro /system 2>/dev/null
+			exit
+		;;
+
+		p|P)
+			$busybox clear;
+			$busybox echo "";
+			#Power efficient
+			chmod 644 /sys/module/workqueue/parameters/power_efficient;
+			$busybox echo -e "\e[01;37m y. Enable \e[00;37m";
+			$busybox echo -e "\e[01;37m n. Disable  \e[00;37m";
+			read -r p
+			case $p in
+				y|Y)
+					$busybox echo "Y" > /sys/module/workqueue/parameters/power_efficient;
+					power_efficient=$($busybox cat /sys/module/workqueue/parameters/power_efficient);
+					$busybox echo "power_efficient: $power_efficient";
+				;;
+				n|N)
+					$busybox echo "N" > /sys/module/workqueue/parameters/power_efficient;
+					power_efficient=$($busybox cat /sys/module/workqueue/parameters/power_efficient);
+					$busybox echo "power_efficient: $power_efficient";
+				;;
+				*)
+					$busybox clear;
+					$busybox echo "Invalid option, please try again";
+					$busybox sleep 1
+					exit
+				;;
+			esac
+			if [ -e $PROFILE_DIR/GovTuner_battery ]; then
+				$busybox setsid $PROFILE_DIR/GovTuner_battery&
+			fi
+			if [ -e $PROFILE_DIR/GovTuner_balanced ]; then
+				$busybox setsid $PROFILE_DIR/GovTuner_balanced&
+			fi
+			if [ -e $PROFILE_DIR/GovTuner_performance ]; then
+				$busybox setsid $PROFILE_DIR/GovTuner_performance&
+			fi
+			sleep 5
+			$busybox clear;
+		;;
+
+		t|T)
+			$busybox clear;
+			$busybox echo ""
+			if [ -e "/data/system/tuned" ]; then
+				TUNED="/data/system/tuned"
+				$busybox echo -e "\e[01;34m The following parameters are tuned :- \e[00;37m"
+				$busybox echo ""
+				$busybox cat $TUNED
+				$busybox echo $divider
+				sleep 15
+			else
+				"Nothing to show"
+				sleep 2
+			fi
+			$busybox clear
+		;;
+
+		*)
+			$busybox clear;
+			$busybox echo "Invalid option, please try again"
+			$busybox sleep 1
+			exit
+		;;
+	esac
 done
