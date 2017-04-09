@@ -116,7 +116,7 @@ alt_detect() {
                  gd1=$($busybox cat "${freq_l[0]}" | $busybox cut -d ' ' -f1)
                  gd2=$($busybox cat "${freq_l[1]}" | $busybox cut -d ' ' -f1)
                  gd3=$($busybox cat "${freq_l[2]}" | $busybox cut -d ' ' -f1)
-                 if [ "$sm1" -lt "$sm2" ] && [ "$sm2" -lt "sm3" ]; then
+                 if [ "$sm1" -lt "$sm2" ] && [ "$sm2" -lt "$sm3" ]; then
                      ga=0; gb=1; gc=2;
                      MAX_FREQ_0="$sm1"
                      MIN_FREQ_0="$gd1"
@@ -127,7 +127,7 @@ alt_detect() {
                      DEVICE=TRIPLE_CLUSTER
                      bL=1; TC=1; CD=1;
                  fi
-                 if [ "$sm2" -lt "$sm3" ] && [ "$sm3" -lt "sm1" ]; then
+                 if [ "$sm2" -lt "$sm3" ] && [ "$sm3" -lt "$sm1" ]; then
                      ga=2; gb=0; gc=1;
                      MAX_FREQ_0="$sm2"
                      MIN_FREQ_0="$gd2"
@@ -138,7 +138,7 @@ alt_detect() {
                      DEVICE=TRIPLE_CLUSTER_SCRAMBLED
                      bL=1; TC=1; CD=1;
                  fi
-                 if [ "$sm3" -lt "$sm1" ] && [ "$sm1" -lt "sm2" ]; then
+                 if [ "$sm3" -lt "$sm1" ] && [ "$sm1" -lt "$sm2" ]; then
                      ga=1; gb=2; gc=0;
                      MAX_FREQ_0="$sm3"
                      MIN_FREQ_0="$gd3"
