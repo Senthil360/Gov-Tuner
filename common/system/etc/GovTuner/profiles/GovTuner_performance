@@ -13,2269 +13,1924 @@
 #  You should have received a copy of the GNU General Public License along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #=======================================================================#
 
-# TODO: Fix this on Cluster-based SoC
 
 busybox="/system/etc/GovTuner/busybox"
-CUR_GOVERNOR=$($busybox cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
-CUR_GOVERNOR_UP=$($busybox cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor | $busybox tr "a-z" "A-Z");
-PROFILE="/system/etc/GovTuner/current/profile"
 FIRST_RUN="/data/system/first_run"
-CHECK1=$($busybox cat /data/system/first_run);
-REG_DIR="/sys/devices/system/cpu/cpufreq"
-CLU_DIR="/sys/devices/system/cpu/cpu0/cpufreq"
-bigLITTLE=0
+IPER=$($busybox cat /data/system/IPER)
+INTERVAL=/data/system/INTERVAL_SEC
+core="/system/etc/GovTuner"
+PROFILE_DIR="/data/system/GovTuner/current"
+PROFILE="/data/system/GovTuner/current/profile"
 CD=2
-SF=0
-#CHECK NUMBER CORE
-i=0
-while [ -d "/sys/devices/system/cpu/cpu$i" ]; do
-	i=$(($i + 1))
-	CORE=$i
-done
+core_ctl=0
 
-$busybox mount -o remount,rw /system 2>/dev/null
-mount -o remount,rw /system 2>/dev/null
-
-if [ "$CHECK1" -eq "1" ]; then
-	$busybox echo "First Run"
-	$busybox echo ""
-else
+if [ -s "/data/system/test" ]; then
 	OUTPUT_ID=$($busybox cat /data/system/test)
 	$busybox echo "Resetting GovTuner"
 	$busybox echo ""
 	$busybox echo "Applying new profile"
 	$busybox echo ""
-	$busybox echo 0 > $FIRST_RUN
-	kill -9 $OUTPUT_ID
+	kill  $OUTPUT_ID 2>/dev/null
 fi
 
-while [ 5 -eq 5 ]; do
-	$busybox mount -o remount,rw /system 2>/dev/null
-	mount -o remount,rw /system 2>/dev/null
+if [ ! -f $INTERVAL ]; then
+  echo 180 > $INTERVAL
+fi
+
+# Devices with core_ctl hotplug have constantly changing clusters which makes it impossible to read from them. So setting core_ctl to 1 will change the
+# way how GT works on the device.
+for z in $cpu/cpu*; do
+		if [ -d $z/cpufreq/core_ctl ]; then
+			core_ctl=1
+		fi
+done
+
+# Alt_detect algorithm by @Senthil360
+# This is the new Cluster_detection algorithm. Further additions to this set of conditions , must always follow this order
+# i) Check whether CD =1 or CD = 0; i.e if cpufreq/$cur_governor exists on /sys/devices/system/cpu or in one of sys/devices/system/cpu/cpu$i directories
+# ii) Check for the number "scaling_governor" files in /sys/devices/system/cpu/cpu$i folder, given that those are actual files and not symlinks
+# iii) If CD = 0; (/sys/devices/system/cpu/cpufreq/$cur_governor); then check if the max frequencies in those folders are equal (REG=1) or not (DC=1) to confirm
+# The  min and Max frequencies, must be initialized , sorted and stored in this function itself. Because sorting values, while the script is actively printing its output at
+# the terminal can return false values and also increases the memory footprint by using more registers.
+alt_detect() {
+    cpu=/sys/devices/system/cpu
+	i=0
+	while [ -d "/sys/devices/system/cpu/cpu$i" ]; do
+		i=$(($i + 1))
+		CORE=$i
+	done
+	c=0
+    for z in $cpu/cpu*; do
+		if [ -f $z/cpufreq/scaling_governor ] && [ ! -L $z/cpufreq/scaling_governor ] && [ ! -L $z/cpufreq ]; then
+            cur_gov[$c]=$(cat $z/cpufreq/scaling_governor)
+			gov[$c]=$z/cpufreq/${cur_gov[$c]}
+            gov_r[$c]=$cpu/cpufreq/${cur_gov[$c]}
+            change[$c]=$z/cpufreq/scaling_governor
+            gov_avail[$c]=$z/cpufreq/scaling_available_governors
+			freq_u[$c]=$z/cpufreq/cpuinfo_max_freq
+            freq_l[$c]=$z/cpufreq/cpuinfo_min_freq
+			c=$((c+1))
+			$busybox sleep 0.5
+		fi
+    done
+    m=0
+    while [ "$m" -lt "${#gov[@]}" ]; do
+         if [ -d "${gov[$m]}" ]; then
+             #Cluster_Device
+             if [ "${#gov[@]}" -eq 1 ]; then
+                 SC=1
+                 ga=0;
+                 DEVICE=SINGLE_CLUSTER
+                 SC=1; CD=1;
+             fi
+             if [ "${#gov[@]}" -eq 2 ]; then
+                 DC=1
+                  sm1=$($busybox cat "${freq_u[0]}" | $busybox cut -d ' ' -f1)
+	              sm2=$($busybox cat "${freq_u[1]}" | $busybox cut -d ' ' -f1)
+                  gd1=$($busybox cat "${freq_l[0]}" | $busybox cut -d ' ' -f1)
+                  gd2=$($busybox cat "${freq_l[1]}" | $busybox cut -d ' ' -f1)
+                 if [ "$sm1" -lt "$sm2" ]; then
+                    ga=0; gc=1;
+                    MAX_FREQ_0="$sm1"
+                    MIN_FREQ_0="$gd1"
+                    MAX_FREQ_2="$sm2"
+                    MIN_FREQ_2="$gd2"
+                    DEVICE=DUAL_CLUSTER
+                    bL=1; DC=1; CD=1;
+                 fi
+                 if [ "$sm2" -lt "$sm1" ]; then
+                    ga=1; gc=0;
+                    MAX_FREQ_0="$sm2"
+                    MIN_FREQ_0="$gd2"
+                    MAX_FREQ_2="$sm1"
+                    MIN_FREQ_2="$gd1"
+                    DEVICE=DUAL_CLUSTER_INVERTED
+                     bL=1; DC=1; CD=1;
+                 fi
+              fi
+             if [ "${#gov[@]}" -eq 3 ]; then
+                 TC=1
+                 sm1=$($busybox cat "${freq_u[0]}" | $busybox cut -d ' ' -f1)
+	             sm2=$($busybox cat "${freq_u[1]}" | $busybox cut -d ' ' -f1)
+                 sm3=$($busybox cat "${freq_u[2]}" | $busybox cut -d ' ' -f1)
+                 gd1=$($busybox cat "${freq_l[0]}" | $busybox cut -d ' ' -f1)
+                 gd2=$($busybox cat "${freq_l[1]}" | $busybox cut -d ' ' -f1)
+                 gd3=$($busybox cat "${freq_l[2]}" | $busybox cut -d ' ' -f1)
+                 if [ "$sm1" -lt "$sm2" ] && [ "$sm2" -lt "sm3" ]; then
+                     ga=0; gb=1; gc=2;
+                     MAX_FREQ_0="$sm1"
+                     MIN_FREQ_0="$gd1"
+                     MAX_FREQ_1="$sm2"
+                     MIN_FREQ_1="$gd2"
+                     MAX_FREQ_2="$sm3"
+                     MIN_FREQ_2="$gd3"
+                     DEVICE=TRIPLE_CLUSTER
+                     bL=1; TC=1; CD=1;
+                 fi
+                 if [ "$sm2" -lt "$sm3" ] && [ "$sm3" -lt "sm1" ]; then
+                     ga=2; gb=0; gc=1;
+                     MAX_FREQ_0="$sm2"
+                     MIN_FREQ_0="$gd2"
+                     MAX_FREQ_1="$sm3"
+                     MIN_FREQ_1="$gd3"
+                     MAX_FREQ_2="$sm1"
+                     MIN_FREQ_2="$gd1"
+                     DEVICE=TRIPLE_CLUSTER_SCRAMBLED
+                     bL=1; TC=1; CD=1;
+                 fi
+                 if [ "$sm3" -lt "$sm1" ] && [ "$sm1" -lt "sm2" ]; then
+                     ga=1; gb=2; gc=0;
+                     MAX_FREQ_0="$sm3"
+                     MIN_FREQ_0="$gd3"
+                     MAX_FREQ_1="$sm1"
+                     MIN_FREQ_1="$gd1"
+                     MAX_FREQ_2="$sm2"
+                     MIN_FREQ_2="$gd2"
+                     DEVICE=TRIPLE_CLUSTER_INVERTED
+                     bL=1; TC=1; CD=1;
+                 fi
+             fi
+         fi
+         if [ -d "${gov_r[0]}" ] || [ -d "${gov_r[1]}" ]; then
+            if [ "${#gov[@]}" -eq 2 ]; then
+                  sm1=$($busybox cat "${freq_u[0]}" | $busybox cut -d ' ' -f1)
+	              sm2=$($busybox cat "${freq_u[1]}" | $busybox cut -d ' ' -f1)
+                  gd1=$($busybox cat "${freq_l[0]}" | $busybox cut -d ' ' -f1)
+                  gd2=$($busybox cat "${freq_l[1]}" | $busybox cut -d ' ' -f1)
+                if [ "$sm1" -lt "$sm2" ]; then
+                    ga=0; gc=1;
+                    MAX_FREQ_0="$sm1"
+                    MIN_FREQ_0="$gd1"
+                    MAX_FREQ_1="$sm2"
+                    MIN_FREQ_1="$gd2"
+                    DEVICE=DUAL_CLUSTER
+                    bL=1; DC=1; CD=0;
+                fi
+                if [ "$sm2" -lt "$sm1" ]; then
+                    ga=1; gc=0;
+                    MAX_FREQ_0="$sm2"
+                    MIN_FREQ_0="$gd2"
+                    MAX_FREQ_1="$sm1"
+                    MIN_FREQ_1="$gd1"
+                    DEVICE=DUAL_CLUSTER_INVERTED
+                     bL=1; DC=1; CD=0;
+                fi
+                if [ "$sm2" -eq "$sm1" ]; then
+                   REG=1
+                   ga=0; CD=0; DC=0;
+                   MAX_FREQ_0=$($busybox cat "$cpu/cpu0/cpufreq/cpuinfo_max_freq" | $busybox cut -d ' ' -f1)
+                   MIN_FREQ_0=$($busybox cat "$cpu/cpu0/cpufreq/cpuinfo_min_freq" | $busybox cut -d ' ' -f1)
+                   DEVICE=REGULAR
+				   unset gov[0];
+				   unset gov[1];
+				   gov[0]=$cpu/cpufreq/${cur_gov[0]}
+                fi
+		    fi
+			if [ "${#gov[@]}" -ne 2 ]; then
+			       REG=1
+                   ga=0; CD=0; DC=0;
+                   MAX_FREQ_0=$($busybox cat "$cpu/cpu0/cpufreq/cpuinfo_max_freq" | $busybox cut -d ' ' -f1)
+                   MIN_FREQ_0=$($busybox cat "$cpu/cpu0/cpufreq/cpuinfo_min_freq" | $busybox cut -d ' ' -f1)
+                   DEVICE=REGULAR
+				   unset gov[0];
+				   unset gov[1];
+				   gov[0]=$cpu/cpufreq/${cur_gov[0]}
+			fi
+         fi
+     m=$(($m+1))
+    done
+}
+if [ "$core_ctl" -eq 0 ]; then
+ alt_detect
+fi
+
+#SET ARRAY
+if [ "$bL" -eq 1 ]; then
+ if [ "$TC" -eq 1 ] && [ "$TC" -ne 0 ]; then
+	#For TRIPLE CLUSTER
+	CDF[0]=$(((($MAX_FREQ_0 - $MIN_FREQ_0) / 160000) * 10000))
+	CDF[1]=$(((($MAX_FREQ_1 - $MIN_FREQ_1) / 160000) * 10000))
+	CDF[2]=$(((($MAX_FREQ_2 - $MIN_FREQ_2) / 160000) * 10000))
+ fi
+ if [ "$DC" -eq 1 ] && [ "$DC" -ne 0 ]; then
+	#For DUAL CLUSTER
+	CDF[0]=$(((($MAX_FREQ_0 - $MIN_FREQ_0) / 160000) * 10000))
+	CDF[2]=$(((($MAX_FREQ_2 - $MIN_FREQ_2) / 160000) * 10000))
+ fi
+fi
+if [ "$SC" -eq 1 ] && [ "$CD" -eq 1 ]; then
+		#For SINGLE CLUSTER
+		CDF[0]=$(((($MAX_FREQ_0 - $MIN_FREQ_0) / 160000) * 10000))
+fi
+if [ "$REG" -eq 1 ] && [ "$CD" -eq 0 ]; then
+		#For REGULAR
+		CDF[0]=$(((($MAX_FREQ_0 - $MIN_FREQ_0) / 160000) * 10000))
+fi
+
+percent_out(){
+	# percent_out value total
+	val=$1
+	total=$2
+	echo "$((200*$val/$total % 2 + 100*$val/$total))"
+}
+
+#For TUNING_BEGINS
+if [ "$core_ctl" -eq 1 ]; then
+   ga=0; gc=4;
+fi
+
+TUNED="/data/system/tuned"
+TWEAKED="/data/system/tweaked"
+cecho() {
+	#cecho "value" path/file
+	file=$2; val=$1
+	echo $val > $file 2>/dev/null
+	if [ $? -ne 0 ] || [ "$(cat $file)" != "$val" ]; then
+		echo "$($busybox basename $file): ${R}error${N}" >> $TUNED
+		echo "$($busybox basename $file): ${R}$(cat $file)${N}" >> $TWEAKED
+	else
+		echo "$($busybox basename $file): ${G}optimized${N}" >> $TUNED
+		echo "$($busybox basename $file): ${G}$(cat $file)${N}" >> $TWEAKED
+	fi
+  if [ "$(cat $INTERVAL)" == "0" ]; then
+  echo active > /data/system/test
+  fi
+	unset file; unset val
+}
+
+z=5
+while [ 5 == $z ]; do
+#IPER_stuff
+if [ -e "/data/system/IPER" ]; then
+		IPER=$($busybox cat /data/system/IPER);
+		if [ $? -ne 0 ]; then
+			echo 1 > /data/system/IPER
+		fi
+	else
+		IPER=1
+		$busybox echo "1" > "/data/system/IPER";
+fi
+
+# IP Values
+if [ "$bL" -eq 1 ]; then
+ if [ "$TC" -eq 1 ] && [ "$TC" -ne 0 ]; then
+	#For TRIPLE CLUSTER
+	IP[0]=$(((${CDF[0]} / 10) * $IPER))
+	HSF[0]=$((${CDF[0]}  * ($IPER-1)))
+	IP[1]=$(((${CDF[1]} / 10) * $IPER))
+	HSF[1]=$((${CDF[1]}  * ($IPER-1)))
+	IP[2]=$(((${CDF[2]} / 10) * $IPER))
+	HSF[2]=$((${CDF[2]}  * ($IPER-1)))
+ fi
+ if [ "$DC" -eq 1 ] && [ "$DC" -ne 0 ]; then
+	#For DUAL CLUSTER
+	IP[0]=$(((${CDF[0]} / 10) * $IPER))
+	HSF[0]=$((${CDF[0]}  * ($IPER-1)))
+	IP[2]=$(((${CDF[2]} / 10) * $IPER))
+	HSF[2]=$((${CDF[2]}  * ($IPER-1)))
+ fi
+fi
+if [ "$SC" -eq 1 ] && [ "$CD" -eq 1 ]; then
+		#For SINGLE CLUSTER
+		IP[0]=$(((${CDF[0]} / 10) * $IPER))
+		HSF[0]=$((${CDF[0]}  * ($IPER-1)))
+fi
+if [ "$REG" -eq 1 ] && [ "$CD" -eq 0 ]; then
+		#For REGULAR
+		IP[0]=$(((${CDF[0]} / 10) * $IPER))
+		HSF[0]=$((${CDF[0]}  * ($IPER-1)))
+fi
+
+# Set IP for ondemand based govs
+# up_threshold
+BASE_UPT=70
+IPT=$(($((IPER*3))-$((IPER/2))))
+UPT=$((BASE_UPT-IPT))
+
+# sampling_rate
+# Rather than calculating, we would rather use preset values to be more accurate across IP values
+
+if [ "$IPER" -eq 1 ]; then
+	SMPR=53000
+elif [ "$IPER" -le 6 ] && [ "$IPER" -ge 2 ]; then
+	SMPR=47000
+elif [ "$IPER" -le 10 ] && [ "$IPER" -ge 7 ]; then
+	SMPR=43500
+else
+	SMPR=43500
+fi
+
+# down_differential
+BASE_DDF=20
+IPD=$(($((IPER*2))-$((IPER/2))))
+DDF=$((BASE_DDF-IPD))
+
+# down_threshold
+PERCENT=57
+for i in $($busybox seq 1 $UPT); do
+	if [ "$(percent_out $i $UPT)" == "$PERCENT" ]; then
+		DTH=$i
+		break
+	fi
+done
+if [ -z "$DTH" ]; then
+	DTH=$((UPT/3))
+fi
+# End Calculations
+
+	if [ -f $INTERVAL ] && [[ $(cat $INTERVAL 2>/dev/null) && $(cat $INTERVAL) -eq 0 ]]; then
+		z=1
+	fi
 	if [ -f "/data/system/tuned" ]; then
 		rm -f /data/system/tuned
+	fi
+	if [ -f "/data/system/tweaked" ]; then
+		rm -f /data/system/tweaked
 	fi
 	if [ -f "/data/system/unsupported" ]; then
 		rm -f /data/system/unsupported
 	fi
 
-	OUTPUT_ID="/data/system/test"
-	$busybox echo $$ > $OUTPUT_ID
+	OUTPUT="/data/system/test"
+	$busybox echo $$ > $OUTPUT
 	$busybox echo "GovTuner_performance" > $PROFILE
-
-	#For REGULAR and SMALL clusters
-	if [ $CORE -eq 1 ]; then
-		CUR_GOVERNOR=$($busybox cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor);
-		if [ -d "/sys/devices/system/cpu/cpufreq/$CUR_GOVERNOR" ]; then
-			FINAL_PATH=$REG_DIR
-			CD=0
-		elif [ -d "/sys/devices/system/cpu/cpu0/cpufreq/$CUR_GOVERNOR" ]; then
-			FINAL_PATH=$CLU_DIR
-			CD=1
-			CLUSTER[0]=0
-		fi
-	else
-		#Check number clusters
-		x=0
-		while [ $x -le $(($CORE - 1)) ]; do
-			RELATED_CPUS="/sys/devices/system/cpu/cpu$x/cpufreq/related_cpus"
-			if [ -f "$RELATED_CPUS" ]; then
-				if [ ${#CLUSTER[@]} -gt 0 ]; then
-					if [ ${#CLUSTER[@]} -eq 1 ] && [ "$($busybox cat $RELATED_CPUS)" !=  "$RC" ]; then
-						CLUSTER[1]=$x
-						RC=$($busybox cat $RELATED_CPUS)
-					elif [ ${#CLUSTER[@]} -eq 2 ] && [ "$($busybox cat $RELATED_CPUS)" !=  "$RC" ]; then
-						CLUSTER[2]=$x
-						break
-					else
-						if [ "$($busybox cat $RELATED_CPUS)" =  "$RC" ]; then
-							RC=$($busybox cat $RELATED_CPUS)
-						fi
-					fi
-				else
-					CLUSTER[0]=$x
-					RC=$($busybox cat $RELATED_CPUS)
-				fi
-			fi
-			x=$(($x + 1))
-		done
-
-		#For REGULAR and SMALL clusters
-		CUR_GOVERNOR=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_governor);
-		if [ -d "/sys/devices/system/cpu/cpufreq/$CUR_GOVERNOR" ]; then
-			FINAL_PATH=$REG_DIR
-			CD=0
-		elif [ -d "/sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/$CUR_GOVERNOR" ]; then
-			FINAL_PATH=$CLU_DIR
-			CD=1
-		fi
-	fi
-
-	#CHECK scaling frequencies
-	if [ "$CD" -eq 1 ] && [ "$CD" -ne 0 ]; then
-		x=0
-		for i in ${CLUSTER[@]}; do
-			if [ -f /sys/devices/system/cpu/cpu$i/cpufreq/scaling_available_frequencies ]; then
-				SF=1
-			elif [ -f /sys/devices/system/cpu/cpufreq/mp-cpufreq/cluster$x_freq_table ]; then
-				SF=2
-			else
-				CD=3
-			fi
-			x=$(($x + 1))
-		done
-	elif [ "$CD" -eq 0 ] && [ "$CD" -ne 1 ]; then
-		if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies ]; then
-			SF=1
-		else
-			CD=3
-		fi
-	fi
-
-	#CHECK bigLITTLE
-	if [ ${#CLUSTER[@]} -ge 2 ]; then
-		a=0
-		for i in ${CLUSTER[@]}; do
-			if [ $SF -eq 1 ]; then
-				scaling_freq=$($busybox cat /sys/devices/system/cpu/cpu$i/cpufreq/scaling_available_frequencies);
-				if [ "$scaling_freq" != "$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_available_frequencies)" ]; then
-					bigLITTLE=1
-				fi
-			fi
-			if [ $SF -eq 2 ]; then
-				scaling_freq=$($busybox cat /sys/devices/system/cpu/cpufreq/mp-cpufreq/cluster$a_freq_table);
-				if [ "$scaling_freq" != "$($busybox cat /sys/devices/system/cpu/cpufreq/mp-cpufreq/cluster0_freq_table)" ]; then
-					bigLITTLE=1
-				fi
-			fi
-			a=$(($a + 1))
-		done
-	fi
-
-	#SET ARRAY
-	if [ ${#CLUSTER[@]} -eq 3 ]; then
-		#For TRIPLE CLUSTER
-		CUR_GOVERNOR[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
-		CUR_GOVERNOR[1]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
-		CUR_GOVERNOR[2]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[2]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
-		CUR_GOVERNOR_UP[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
-		CUR_GOVERNOR_UP[1]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
-		CUR_GOVERNOR_UP[2]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[2]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
-		CLU_DIR[0]="/sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq";
-		CLU_DIR[1]="/sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq";
-		CLU_DIR[2]="/sys/devices/system/cpu/cpu${CLUSTER[2]}/cpufreq";
-		AVAILABLE_GOVERNORS[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_available_governors);
-		AVAILABLE_GOVERNORS[1]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/scaling_available_governors);
-		AVAILABLE_GOVERNORS[2]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[2]}/cpufreq/scaling_available_governors);
-		GOVERNOR[0]="${CLU_DIR[0]}/${CUR_GOVERNOR[0]}";
-		GOVERNOR[1]="${CLU_DIR[1]}/${CUR_GOVERNOR[1]}";
-		GOVERNOR[2]="${CLU_DIR[2]}/${CUR_GOVERNOR[2]}";
-		MIN_CPU_FREQ[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/cpuinfo_min_freq);
-		MIN_CPU_FREQ[1]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/cpuinfo_min_freq);
-		MIN_CPU_FREQ[2]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[2]}/cpufreq/cpuinfo_min_freq);
-		MAX_CPU_FREQ[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/cpuinfo_max_freq);
-		MAX_CPU_FREQ[1]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/cpuinfo_max_freq);
-		MAX_CPU_FREQ[2]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[2]}/cpufreq/cpuinfo_max_freq);
-		CDF[0]=$((((${MAX_CPU_FREQ[0]} - ${MIN_CPU_FREQ[0]}) / 100000) * 10000))
-		CDF[1]=$((((${MAX_CPU_FREQ[1]} - ${MIN_CPU_FREQ[1]}) / 100000) * 10000))
-		CDF[2]=$((((${MAX_CPU_FREQ[2]} - ${MIN_CPU_FREQ[2]}) / 100000) * 10000))
-		if [ $SF -eq 1 ]; then
-			FREQ_SOURCE[0]="/sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_available_frequencies";
-			FREQ_SOURCE[1]="/sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/scaling_available_frequencies";
-			FREQ_SOURCE[2]="/sys/devices/system/cpu/cpu${CLUSTER[2]}/cpufreq/scaling_available_frequencies";
-		elif [ $SF -eq 2 ]; then
-			FREQ_SOURCE[0]="/sys/devices/system/cpu/cpufreq/mp-cpufreq/cluster0_freq_table";
-			FREQ_SOURCE[1]="/sys/devices/system/cpu/cpufreq/mp-cpufreq/cluster1_freq_table";
-			FREQ_SOURCE[2]="/sys/devices/system/cpu/cpufreq/mp-cpufreq/cluster2_freq_table";
-		fi
-	elif [ ${#CLUSTER[@]} -eq 2 ]; then
-		#For DUAL CLUSTER
-		CUR_GOVERNOR[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
-		CUR_GOVERNOR[1]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
-		CUR_GOVERNOR_UP[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
-		CUR_GOVERNOR_UP[1]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
-		CLU_DIR[0]="/sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq";
-		CLU_DIR[1]="/sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq";
-		AVAILABLE_GOVERNORS[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_available_governors);
-		AVAILABLE_GOVERNORS[1]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/scaling_available_governors);
-		GOVERNOR[0]="${CLU_DIR[0]}/${CUR_GOVERNOR[0]}";
-		GOVERNOR[1]="${CLU_DIR[1]}/${CUR_GOVERNOR[1]}";
-		MIN_CPU_FREQ[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/cpuinfo_min_freq);
-		MIN_CPU_FREQ[1]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/cpuinfo_min_freq);
-		MAX_CPU_FREQ[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/cpuinfo_max_freq);
-		MAX_CPU_FREQ[1]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/cpuinfo_max_freq);
-		CDF[0]=$((((${MAX_CPU_FREQ[0]} - ${MIN_CPU_FREQ[0]}) / 100000) * 10000))
-		CDF[1]=$((((${MAX_CPU_FREQ[1]} - ${MIN_CPU_FREQ[1]}) / 100000) * 10000))
-		if [ $SF -eq 1 ]; then
-			FREQ_SOURCE[0]="/sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_available_frequencies";
-			FREQ_SOURCE[1]="/sys/devices/system/cpu/cpu${CLUSTER[1]}/cpufreq/scaling_available_frequencies";
-		elif [ $SF -eq 2 ]; then
-			FREQ_SOURCE[0]="/sys/devices/system/cpu/cpufreq/mp-cpufreq/cluster0_freq_table";
-			FREQ_SOURCE[1]="/sys/devices/system/cpu/cpufreq/mp-cpufreq/cluster1_freq_table";
-		fi
-	else
-		if [ "$CD" -eq 1 ] && [ "$CD" -ne 0 ]; then
-			#For SINGLE CLUSTER
-			CUR_GOVERNOR[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
-			CUR_GOVERNOR_UP[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
-			CLU_DIR[0]="/sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq";
-			AVAILABLE_GOVERNORS[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_available_governors);
-			GOVERNOR[0]="${CLU_DIR[0]}/${CUR_GOVERNOR[0]}";
-			MIN_CPU_FREQ[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/cpuinfo_min_freq);
-			MAX_CPU_FREQ[0]=$($busybox cat /sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/cpuinfo_max_freq);
-			CDF[0]=$((((${MAX_CPU_FREQ[0]} - ${MIN_CPU_FREQ[0]}) / 100000) * 10000))
-			if [ $SF -eq 1 ]; then
-				FREQ_SOURCE[0]="/sys/devices/system/cpu/cpu${CLUSTER[0]}/cpufreq/scaling_available_frequencies";
-			elif [ $SF -eq 2 ]; then
-				FREQ_SOURCE[0]="/sys/devices/system/cpu/cpufreq/mp-cpufreq/cluster0_freq_table";
-			fi
-		fi
-		if [ "$CD" -eq 0 ] && [ "$CD" -ne 1 ]; then
-			#For REGULAR
-			CUR_GOVERNOR[0]=$($busybox cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
-			CUR_GOVERNOR_UP[0]=$($busybox cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor | $busybox tr "A-Z" "a-z");
-			CLU_DIR[0]="/sys/devices/system/cpu/cpufreq";
-			AVAILABLE_GOVERNORS[0]=$($busybox cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors);
-			GOVERNOR[0]="${CLU_DIR[0]}/${CUR_GOVERNOR[0]}";
-			MIN_CPU_FREQ[0]=$($busybox cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq);
-			MAX_CPU_FREQ[0]=$($busybox cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq);
-			CDF[0]=$((((${MAX_CPU_FREQ[0]} - ${MIN_CPU_FREQ[0]}) / 100000) * 10000))
-			if [ $SF -eq 1 ]; then
-				FREQ_SOURCE[0]="/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies";
-			elif [ $SF -eq 2 ]; then
-				FREQ_SOURCE[0]="/sys/devices/system/cpu/cpufreq/mp-cpufreq/cluster0_freq_table";
-			fi
-		fi
-	fi
-
-	#CHECK LITTLE/MIDDLE/BIG CORE
-	if [ ${#CLUSTER[@]} -ge 2 ]; then
-		a=0
-		for i in ${CLUSTER[@]}; do
-			#Freq core
-			if [ "$SF" -eq 1 ] || [ "$SF" -eq 2 ]; then
-				UFREQ[$a]=$($busybox awk '{print $NF}' ${FREQ_SOURCE[$a]});
-				LFREQ[$a]=$($busybox awk -v 1=$1 '{print $1}' ${FREQ_SOURCE[$a]});
-				Show_freq[$a]=2
-			fi
-			if [ "$SF" -eq 0 ] && [ -f /sys/devices/system/cpu/cpu$i/cpufreq/scaling_max_freq ]; then
-				UFREQ[$a]=$($busybox cat /sys/devices/system/cpu/cpu$i/cpufreq/scaling_max_freq);
-				LFREQ[$a]=$($busybox cat /sys/devices/system/cpu/cpu$i/cpufreq/scaling_min_freq);
-				Show_freq[$a]=2
-			fi
-			if [ ! -f /sys/devices/system/cpu/cpu$i/cpufreq/scaling_max_freq ] && [ "$SF" -eq 0 ]; then
-				Show_freq[$a]=0
-			fi
-			if [ "${Show_freq[$a]}" -eq 0 ]; then
-				$busybox echo ""
-				$busybox echo $divider
-			fi
-			if [ "${Show_freq[$a]}" -eq 2 ]; then
-				MAX_FREQ[$a]=$((${UFREQ[$a]} / 1000));
-				MIN_FREQ[$a]=$((${LFREQ[$a]} / 1000));
-			fi
-			C[$a]=${MAX_CPU_FREQ[$a]}
-			a=$(($a + 1))
-		done
-		if [ ${#CLUSTER[@]} -eq 3 ]; then
-			if [ "${C[0]}" -le "${C[1]}" ] && [ "${C[1]}" -le "${C[2]}" ]; then
-				LITTLE_CORE=${CLUSTER[0]}
-				MIDDLE_CORE=${CLUSTER[1]}
-				BIG_CORE=${CLUSTER[2]}
-				IN=0
-			elif [ "${C[0]}" -ge "${C[1]}" ] && [ "${C[1]}" -ge "${C[2]}" ]; then
-				LITTLE_CORE=${CLUSTER[2]}
-				MIDDLE_CORE=${CLUSTER[1]}
-				BIG_CORE=${CLUSTER[0]}
-				IN=1
-			fi
-		else
-			if [ "${C[0]}" -lt "${C[1]}" ]; then
-				LITTLE_CORE=${CLUSTER[0]}
-				BIG_CORE=${CLUSTER[1]}
-				IN=0
-			elif [ "${C[0]}" -gt "${C[1]}" ]; then
-				LITTLE_CORE=${CLUSTER[1]}
-				BIG_CORE=${CLUSTER[0]}
-				IN=1
-			fi
-		fi
-	fi
-
-	TUNED="/data/system/tuned"
 
 	#Power efficient
 	if [ -e "/sys/module/workqueue/parameters/power_efficient" ]; then
 		#Tweaks adding
 		$busybox echo ">>> TWEAKS ADDING <<<" >> $TUNED
 		$busybox echo "" >> $TUNED
+		$busybox echo ">>> TWEAKS ADDING <<<" >> $TWEAKED
+		$busybox echo "" >> $TWEAKED
 		power_efficient=$($busybox cat /sys/module/workqueue/parameters/power_efficient);
 		$busybox echo "power_efficient: $power_efficient" >> $TUNED
+		$busybox echo "power_efficient: $power_efficient" >> $TWEAKED
 		$busybox echo "" >> $TUNED
+		$busybox echo "" >> $TWEAKED
 	fi
 
 	#TUNING_BEGINS
-	if [ $IN -eq 0 ]; then
-		#a=LITTLE cluster
-		#b=MIDDLE cluster
-		#c=BIG and dual cluster
-		if [ $bigLITTLE -eq 1 ]; then
-			if [ ${#CLUSTER[@]} -eq 3 ]; then
-				a=0; b=1; c=2;
-			else
-				a=0; c=1;
-			fi
-		else
-			if [ ${#CLUSTER[@]} -eq 2 ]; then
-				a=0; c=1;
-			elif [ ${#CLUSTER[@]} -eq 1 ]; then
-				a=0;
-			fi
-		fi
-	else
-		if [ $bigLITTLE -eq 1 ]; then
-			if [ ${#CLUSTER[@]} -eq 3 ]; then
-				a=2; b=1; c=0;
-			else
-				a=1; c=0;
-			fi
-		else
-			a=0;
-		fi
-	fi
 	#For LITTLE cluster
-	if [ ${#CLUSTER[@]} -ge 1 ]; then
+	if [ "$TC" -eq 1 ] || [ "$DC" -eq 1 ] || [ "$SC" -eq 1 ] || [ "$REG" -eq 1 ] || [ "$core_ctl" -eq 1 ]; then
 		$busybox echo ">>> GOVERNOR TUNING <<<" >> $TUNED
 		$busybox echo "" >> $TUNED
-		if [ -d ${GOVERNOR[$a]} ]; then
-			TL_1=$((${MIN_CPU_FREQ[$a]} + (${CDF[$a]} - 50000)))
-			TL_2=$(($TL_1 + (${CDF[$a]} - 40000)))
-			TL_3=$(($TL_2 + (${CDF[$a]} - 30000)))
-			TL_4=$(($TL_3 + (${CDF[$a]} - 20000)))
-			TL_5=$(($TL_4 + ${CDF[$a]}))
-			TL_6=$(($TL_5 + ${CDF[$a]}))
-			TL_7=$(($TL_6 + (${CDF[$a]} + 20000)))
-			TL_8=$(($TL_7 + ${CDF[$a]}))
-			TL_9=$(($TL_8 + (${CDF[$a]} + 50000)))
-			for i in ${GOVERNOR[$a]}; do
-				if [ $bigLITTLE -eq 1 ]; then
-					if [ ${#CLUSTER[@]} -eq 3 ]; then
-						if [ $IN -eq 0 ]; then
-							if [ $i = ${GOVERNOR[0]} ]; then
-								$busybox echo -e "\e[01;37m Governor LITTLE core: ${CUR_GOVERNOR[0]} \e[00;37m" >> $TUNED
-							elif [ $i = ${GOVERNOR[1]} ]; then
-								$busybox echo -e "\e[01;37m Governor Middle core: ${CUR_GOVERNOR[1]} \e[00;37m" >> $TUNED
-							else
-								$busybox echo -e "\e[01;37m Governor big core:    ${CUR_GOVERNOR[2]} \e[00;37m" >> $TUNED
-							fi
-						else
-							if [ $i = ${GOVERNOR[2]} ]; then
-								$busybox echo -e "\e[01;37m Governor LITTLE core: ${CUR_GOVERNOR[2]} \e[00;37m" >> $TUNED
-							elif [ $i = ${GOVERNOR[1]} ]; then
-								$busybox echo -e "\e[01;37m Governor Middle core: ${CUR_GOVERNOR[1]} \e[00;37m" >> $TUNED
-							else
-								$busybox echo -e "\e[01;37m Governor big core:    ${CUR_GOVERNOR[0]} \e[00;37m" >> $TUNED
-							fi
-						fi
-					else
-						if [ $IN -eq 0 ]; then
-							if [ $i = ${GOVERNOR[0]} ]; then
-								$busybox echo -e "\e[01;37m Governor LITTLE core: ${CUR_GOVERNOR[0]} \e[00;37m" >> $TUNED
-							else
-								$busybox echo -e "\e[01;37m Governor big core:    ${CUR_GOVERNOR[1]} \e[00;37m" >> $TUNED
-							fi
-						else
-							if [ $i = ${GOVERNOR[1]} ]; then
-								$busybox echo -e "\e[01;37m Governor LITTLE core: ${CUR_GOVERNOR[1]} \e[00;37m" >> $TUNED
-							else
-								$busybox echo -e "\e[01;37m Governor big core:    ${CUR_GOVERNOR[0]} \e[00;37m" >> $TUNED
-							fi
-						fi
-					fi
-				else
-					if [ ${#CLUSTER[@]} -eq 2 ]; then
-						if [ $i = ${GOVERNOR[0]} ]; then
-							$busybox echo -e "\e[01;37m Governor CPU 1: ${CUR_GOVERNOR[0]} \e[00;37m" >> $TUNED
-						elif [ $i = ${GOVERNOR[1]} ]; then
-							$busybox echo -e "\e[01;37m Governor CPU 2: ${CUR_GOVERNOR[1]} \e[00;37m" >> $TUNED
-						fi
-					elif [ ${#CLUSTER[@]} -eq 1 ]; then
-						$busybox echo -e "\e[01;37m Governor: ${CUR_GOVERNOR[0]} \e[00;37m" >> $TUNED
-					fi
+		$busybox echo ">>> GOVERNOR TWEAKED <<<" >> $TWEAKED
+		$busybox echo "" >> $TWEAKED
+		if [ -d ${gov[0]} ] || [ -d ${gov_r[0]} ] || [ "$core_ctl" -eq 1 ]; then
+			#TL_0 for only hispeed_freq
+			TL_0=$((${IP[0]} * 11))
+			TL_1=$(($MIN_FREQ_0 + (${IP[0]} * 3)))
+			TL_2=$(($TL_1 + ${CDF[0]} + (${IP[0]} * 2)))
+			TL_3=$(($TL_2 + ${CDF[0]} + ${IP[0]}))
+			TL_4=$(($TL_3 + (${CDF[0]} * 2)))
+			TL_5=$(($TL_4 + (${CDF[0]} * 2)))
+			TL_6=$(($TL_5 + ${CDF[0]}))
+			TL_7=$(($TL_6 + ${CDF[0]}))
+			TL_8=$(($TL_7 + ${CDF[0]}))
+			TL_9=$(($TL_8 + ${CDF[0]}))
+			for i in ${gov[$ga]}; do
+				if [ "$bL" -eq 1 ]; then
+								$busybox echo -e "\e[01;37m Governor LITTLE core: ${cur_gov[$ga]} \e[00;37m" >> $TUNED
+								$busybox echo -e "\e[01;37m Governor LITTLE core: ${cur_gov[$ga]} \e[00;37m" >> $TWEAKED
+				fi
+				if [ "$SC" -eq 1 ] || [ "$REG" -eq 1 ]; then
+				   $busybox echo -e "\e[01;37m Governor: ${cur_gov[$ga]} \e[00;37m" >> $TUNED
+				   $busybox echo -e "\e[01;37m Governor: ${cur_gov[$ga]} \e[00;37m" >> $TWEAKED
 				fi
 				chmod 644 $i/*
 				if [ -e "$i/above_hispeed_delay" ]; then
-					$busybox echo "20000 $TL_2:25000 $TL_3:30000 $TL_4:40000 $TL_5:20000 $TL_7:30000 $TL_8:50000" > "$i/above_hispeed_delay";
-					$busybox echo "above_hispeed_delay" >> $TUNED
+					cecho "20000 $TL_2:25000 $TL_3:30000 $TL_4:40000 $TL_5:20000 $TL_7:30000 $TL_8:50000" $i/above_hispeed_delay;
 				fi
 				if [ -e "$i/boost" ]; then
-					$busybox echo "0" > "$i/boost";
-					$busybox echo "boost" >> $TUNED
-				fi
-				if [ -e "$i/boostpulse" ]; then
-					$busybox echo "0" > "$i/boostpulse";
-					$busybox echo "boostpulse" >> $TUNED
+					cecho "0" $i/boost;
 				fi
 				if [ -e "$i/boostpulse_duration" ]; then
-					$busybox echo "0" > "$i/boostpulse_duration";
-					$busybox echo "boostpulse_duration" >> $TUNED
+					cecho "0" $i/boostpulse_duration;
 				fi
 				if [ -e "$i/go_hispeed_load" ]; then
-					if [ ${CDF[$a]} -lt 150000 ] && [ ${CDF[$a]} -gt 110000 ]; then
-						$busybox echo "87" > "$i/go_hispeed_load";
-					elif [ ${CDF[$a]} -lt 110000 ] && [ ${CDF[$a]} -gt 0 ]; then
-						$busybox echo "75" > "$i/go_hispeed_load";
+					if [ "${CDF[0]}" -lt 150000 ] && [ "${CDF[0]}" -gt 110000 ]; then
+						cecho "87" $i/go_hispeed_load;
+					elif [ "${CDF[0]}" -lt 110000 ] && [ "${CDF[0]}" -gt 0 ]; then
+						cecho "75" $i/go_hispeed_load;
 					else
-						$busybox echo "99" > "$i/go_hispeed_load";
-						$busybox echo "go_hispeed_load" >> $TUNED
+						cecho "99" $i/go_hispeed_load;
 					fi
 				fi
-				if [ -e "$i/hispeed_freq" ]; then			   
-				   $busybox echo "${MIN_CPU_FREQ[$a]}" > "$i/hispeed_freq";
-				   $busybox echo "hispeed_freq" >> $TUNED
+				if [ -e "$i/hispeed_freq" ]; then
+						cecho "$((${HSF[0]} + $MIN_FREQ_0))" $i/hispeed_freq;
+						$busybox echo "LITTLE $((${HSF[0]} + $MIN_FREQ_0))"
+						$busybox sleep 1
 				fi
 				if [ -e "$i/max_freq_hysteresis" ]; then
-					$busybox echo "0" > "$i/max_freq_hysteresis";
-					$busybox echo "max_freq_hysteresis" >> $TUNED
+					cecho "0" $i/max_freq_hysteresis;
 				fi
 				if [ -e "$i/align_windows" ]; then
-					$busybox echo "0" > "$i/align_windows";
-					$busybox echo "align_windows" >> $TUNED
+					cecho "0" $i/align_windows;
 				fi
 				if [ -e "$i/io_is_busy" ]; then
-					$busybox echo "1" > "$i/io_is_busy";
-					$busybox echo "io_is_busy" >> $TUNED
+					cecho "1" $i/io_is_busy;
 				fi
 				if [ -e "$i/min_sample_time" ]; then
-					$busybox echo "50000" > "$i/min_sample_time";
-					$busybox echo "min_sample_time" >> $TUNED
+					cecho "50000" $i/min_sample_time;
 				fi
 				if [ -e "$i/sampling_down_factor" ]; then
-					$busybox echo "1" > "$i/sampling_down_factor";
-					$busybox echo "sampling_down_factor" >> $TUNED
+					cecho "1" $i/sampling_down_factor;
 				fi
 				if [ -e "$i/target_loads" ]; then
-					$busybox echo "0 ${MIN_CPU_FREQ[$a]}:50 $TL_1:25 $TL_2:35 $TL_3:45 $TL_4:60 $TL_5:65 $TL_6:73 $TL_7:90 $TL_8:93 $TL_9:85" > "$i/target_loads";
-					$busybox echo "target_loads" >> $TUNED
+					cecho "0 $MIN_FREQ_0:50 $TL_1:25 $TL_2:35 $TL_3:45 $TL_4:60 $TL_5:65 $TL_6:73 $TL_7:90 $TL_8:93 $TL_9:85" $i/target_loads;
 				fi
 				if [ -e "$i/timer_rate" ]; then
-					$busybox echo "20000" > "$i/timer_rate";
-					$busybox echo "timer_rate" >> $TUNED
+					cecho "20000" $i/timer_rate;
 				fi
 				if [ -e "$i/timer_slack" ]; then
-					$busybox echo "0" > "$i/timer_slack";
-					$busybox echo "timer_slack" >> $TUNED
+					cecho "0" $i/timer_slack;
 				fi
 				if [ -e "$i/up_threshold_any_cpu_freq" ]; then
-					$busybox echo "0" > "$i/up_threshold_any_cpu_freq";
-					$busybox echo "up_threshold_any_cpu_freq" >> $TUNED
+					cecho "0" $i/up_threshold_any_cpu_freq;
 				fi
 					if [ -e "$i/up_threshold_any_cpu_load" ]; then
-					$busybox echo "0" > "$i/up_threshold_any_cpu_load";
-					$busybox echo "up_threshold_any_cpu_load" >> $TUNED
+					cecho "0" $i/up_threshold_any_cpu_load;
 				fi
 				if [ -e "$i/down_threshold" ]; then
-					$busybox echo "40" > "$i/down_threshold";
-					$busybox echo "down_threshold" >> $TUNED
+					cecho "$DTH" $i/down_threshold;
 				fi
 				if [ -e "$i/freq_step" ]; then
-					$busybox echo "30" > "$i/freq_step";
-					$busybox echo "freq_step" >> $TUNED
+					cecho "30" $i/freq_step;
 				fi
 				if [ -e "$i/ignore_nice_load" ]; then
-					$busybox echo "1" > "$i/ignore_nice_load";
-					$busybox echo "ignore_nice_load" >> $TUNED
+					cecho "1" $i/ignore_nice_load;
 				fi
-				if [ -e "$i/sampling_rate" ] && [ "${CUR_GOVERNOR[$a]}" != "conservative" ]; then
-					$busybox echo "45000" > "$i/sampling_rate";
-					$busybox echo "sampling_rate" >> $TUNED
+				if [ -e "$i/sampling_rate" ] && [[ "${cur_gov[$ga]}" != "conservative" && "${cur_gov[$ga]}" != "lionfish" ]]; then
+					cecho "$SMPR" $i/sampling_rate;
 				fi
-				if [ -e "$i/sampling_rate_min" ] && [ "${CUR_GOVERNOR[$a]}" != "conservative" ]; then
-					$busybox echo "30000" > "$i/sampling_rate_min";
-					$busybox echo "sampling_rate_min" >> $TUNED
+				if [ -e "$i/sampling_rate_min" ] && [[ "${cur_gov[$ga]}" != "conservative" && "${cur_gov[$ga]}" != "ondemand" && "${cur_gov[$ga]}" != "lionfish" ]]; then
+					cecho "10000" $i/sampling_rate_min;
 				fi
 				if [ -e "$i/up_threshold" ]; then
-					$busybox echo "53" > "$i/up_threshold";
-					$busybox echo "up_threshold" >> $TUNED
+					cecho "$UPT" $i/up_threshold;
 				fi
 				if [ -e "$i/sync_freq" ]; then
-					$busybox echo "0" > "$i/sync_freq";
-					$busybox echo "sync_freq" >> $TUNED
+					cecho "0" $i/sync_freq;
 				fi
 				if [ -e "$i/two_phase_freq" ]; then
-					$busybox echo "960000,960000,960000,960000" > "$i/two_phase_freq";
-					$busybox echo "two_phase_freq" >> $TUNED
+					cecho "960000,960000,960000,960000" $i/two_phase_freq;
 				fi
 				if [ -e "$i/jump_level" ]; then
-					$busybox echo "1000000" > "$i/jump_level";
-					$busybox echo "jump_level" >> $TUNED
+					cecho "1000000" $i/jump_level;
 				fi
 				if [ -e "$i/jump_threshold" ]; then
-					$busybox echo "60" > "$i/jump_threshold";
-					$busybox echo "jump_threshold" >> $TUNED
+					cecho "60" $i/jump_threshold;
 				fi
 				if [ -e "$i/powersave_bias" ]; then
-					$busybox echo "0" > "$i/powersave_bias";
-					$busybox echo "powersave_bias" >> $TUNED
+					cecho "0" $i/powersave_bias;
 				fi
 				if [ -e "$i/down_differential" ]; then
-					$busybox echo "8" > "$i/down_differential";
-					$busybox echo "down_differential" >> $TUNED
+					cecho "$DDF" $i/down_differential;
 				fi
 				if [ -e "$i/second_phase_freq" ]; then
-					$busybox echo "${MIN_CPU_FREQ[$a]}" > "$i/second_phase_freq";
-					$busybox echo "second_phase_freq" >> $TUNED
+					cecho "$MIN_FREQ_0" $i/second_phase_freq;
 				fi
 				if [ -e "$i/boostfreq" ]; then
-					$busybox echo "0" > "$i/boostfreq";
-					$busybox echo "boostfreq" >> $TUNED
+					cecho "0" $i/boostfreq;
 				fi
 				if [ -e "$i/micro_freq_up_threshold" ]; then
-					$busybox echo "65" > "$i/micro_freq_up_threshold";
-					$busybox echo "micro_freq_up_threshold" >> $TUNED
+					cecho "65" $i/micro_freq_up_threshold;
 				fi
 				if [ -e "$i/up_threshold_min_freq" ]; then
-					$busybox echo "600000" > "$i/up_threshold_min_freq";
-					$busybox echo "up_threshold_min_freq" >> $TUNED
+					cecho "600000" $i/up_threshold_min_freq;
 				fi
 				if [ -e "$i/ba_lock" ]; then
-					$busybox echo "0" > "$i/ba_lock";
-					$busybox echo "ba_lock" >> $TUNED
+					cecho "0" $i/ba_lock;
 				fi
 				if [ -e "$i/down_differential_multi_core" ]; then
-					$busybox echo "35" > "$i/down_differential_multi_core";
-					$busybox echo "down_differential_multi_core" >> $TUNED
+					cecho "35" $i/down_differential_multi_core;
 				fi
 				if [ -e "$i/freq_down_step" ]; then
-					$busybox echo "${MIN_CPU_FREQ[$a]}" > "$i/freq_down_step";
-					$busybox echo "freq_down_step" >> $TUNED
+					cecho "$MIN_FREQ_0" $i/freq_down_step;
 				fi
 				if [ -e "$i/freq_down_step_barrier" ]; then
-					$busybox echo "${MIN_CPU_FREQ[$a]}" > "$i/freq_down_step_barrier";
-					$busybox echo "freq_down_step_barrier" >> $TUNED
+					cecho "$MIN_FREQ_0" $i/freq_down_step_barrier;
 				fi
 				if [ -e "$i/input_event_min_freq" ]; then
-					$busybox echo "${MIN_CPU_FREQ[$a]}, ${MIN_CPU_FREQ[$a]}, ${MIN_CPU_FREQ[$a]}, ${MIN_CPU_FREQ[$a]}" > "$i/input_event_min_freq";
-					$busybox echo "input_event_min_freq" >> $TUNED
+					cecho "$MIN_FREQ_0, $MIN_FREQ_0, $MIN_FREQ_0, $MIN_FREQ_0" $i/input_event_min_freq;
 				fi
 				if [ -e "$i/optimal_freq" ]; then
-					$busybox echo "${MIN_CPU_FREQ[$a]}" > "$i/optimal_freq";
-					$busybox echo "optimal_freq" >> $TUNED
+					cecho "$MIN_FREQ_0" $i/optimal_freq;
 				fi
 				if [ -e "$i/shortcut" ]; then
-					$busybox echo "0" > "$i/shortcut";
-					$busybox echo "shortcut" >> $TUNED
+					cecho "0" $i/shortcut;
 				fi
 				if [ -e "$i/up_threshold_multi_core" ]; then
-					$busybox echo "0" > "$i/up_threshold_multi_core";
-					$busybox echo "up_threshold_multi_core" >> $TUNED
+					cecho "0" $i/up_threshold_multi_core;
 				fi
 				if [ -e "$i/freq_responsiveness" ]; then
-					$busybox echo "${MIN_CPU_FREQ[$a]}" > "$i/freq_responsiveness";
-					$busybox echo "freq_responsiveness" >> $TUNED
+					cecho "$MIN_FREQ_0" $i/freq_responsiveness;
 				fi
 				if [ -e "$i/awake_ideal_freq" ]; then
-					$busybox echo "${MIN_CPU_FREQ[$a]}" > "$i/awake_ideal_freq";
-					$busybox echo "awake_ideal_freq" >> $TUNED
+					cecho "$MIN_FREQ_0" $i/awake_ideal_freq;
 				fi
 				if [ -e "$i/boost_duration" ]; then
-					$busybox echo "0" > "$i/boost_duration";
-					$busybox echo "boost_duration" >> $TUNED
+					cecho "0" $i/boost_duration;
 				fi
 				if [ -e "$i/boost_freq" ]; then
-					$busybox echo "${MIN_CPU_FREQ[$a]}" > "$i/boost_freq";
-					$busybox echo "boost_freq" >> $TUNED
+					cecho "$MIN_FREQ_0" $i/boost_freq;
 				fi
 				if [ -e "$i/debug_mask" ]; then
-					$busybox echo "32" > "$i/debug_mask";
-					$busybox echo "debug_mask" >> $TUNED
+					cecho "32" $i/debug_mask;
 				fi
 				if [ -e "$i/down_rate" ]; then
-					$busybox echo "10000" > "$i/down_rate";
-					$busybox echo "down_rate" >> $TUNED
+					cecho "10000" $i/down_rate;
 				fi
 				if [ -e "$i/ignore_nice" ]; then
-					$busybox echo "0" > "$i/ignore_nice";
-					$busybox echo "ignore_nice" >> $TUNED
+					cecho "0" $i/ignore_nice;
 				fi
 				if [ -e "$i/input_boost_duration" ]; then
-					$busybox echo "0" > "$i/input_boost_duration";
-					$busybox echo "input_boost_duration" >> $TUNED
+					cecho "0" $i/input_boost_duration;
 				fi
 				if [ -e "$i/max_cpu_load" ]; then
-					$busybox echo "100" > "$i/max_cpu_load";
-					$busybox echo "max_cpu_load" >> $TUNED
+					cecho "100" $i/max_cpu_load;
 				fi
 				if [ -e "$i/min_cpu_load" ]; then
-					$busybox echo "5" > "$i/min_cpu_load";
-					$busybox echo "min_cpu_load" >> $TUNED
+					cecho "5" $i/min_cpu_load;
 				fi
 				if [ -e "$i/min_sampling_rate" ]; then
-					$busybox echo "20000" > "$i/min_sampling_rate";
-					$busybox echo "min_sampling_rate" >> $TUNED
+					cecho "20000" $i/min_sampling_rate;
 				fi
 				if [ -e "$i/ramp_down_step" ]; then
-					$busybox echo "162000" > "$i/ramp_down_step";
-					$busybox echo "ramp_down_step" >> $TUNED
+					cecho "162000" $i/ramp_down_step;
 				fi
 				if [ -e "$i/ramp_up_during_boost" ]; then
-					$busybox echo "0" > "$i/ramp_up_during_boost";
-					$busybox echo "ramp_up_during_boost" >> $TUNED
+					cecho "0" $i/ramp_up_during_boost;
 				fi
 				if [ -e "$i/ramp_up_step" ]; then
-					$busybox echo "100000" > "$i/ramp_up_step";
-					$busybox echo "ramp_up_step" >> $TUNED
+					cecho "100000" $i/ramp_up_step;
 				fi
 				if [ -e "$i/suspend_ideal_freq" ]; then
-					$busybox echo "${MIN_CPU_FREQ[$a]}" > "$i/suspend_ideal_freq";
-					$busybox echo "suspend_ideal_freq" >> $TUNED
+					cecho "$MIN_FREQ_0" $i/suspend_ideal_freq;
 				fi
 				if [ -e "$i/touch_poke_freq" ]; then
-					$busybox echo "0" > "$i/touch_poke_freq";
-					$busybox echo "touch_poke_freq" >> $TUNED
+					cecho "0" $i/touch_poke_freq;
 				fi
 				if [ -e "$i/up_rate" ]; then
-					$busybox echo "0" > "$i/up_rate";
-					$busybox echo "up_rate" >> $TUNED
+					cecho "0" $i/up_rate;
 				fi
 				if [ -e "$i/optimal_max_freq" ]; then
-					$busybox echo "2000000" > "$i/optimal_max_freq";
-					$busybox echo "optimal_max_freq" >> $TUNED
+					cecho "2000000" $i/optimal_max_freq;
 				fi
 				if [ -e "$i/freq_calc_thresh" ]; then
-					$busybox echo "1100000" > "$i/freq_calc_thresh";
-					$busybox echo "freq_calc_thresh" >> $TUNED
+					cecho "1100000" $i/freq_calc_thresh;
 				fi
 				if [ -e "$i/allowed_misses" ]; then
-					$busybox echo "5" > "$i/allowed_misses";
-					$busybox echo "allowed_misses" >> $TUNED
+					cecho "5" $i/allowed_misses;
 				fi
 				if [ -e "$i/target_residency" ]; then
-					$busybox echo "10000" > "$i/target_residency";
-					$busybox echo "target_residency" >> $TUNED
+					cecho "10000" $i/target_residency;
 				fi
 				if [ -e "$i/inter_hifreq" ]; then
-					$busybox echo "1500000" > "$i/inter_hifreq";
-					$busybox echo "inter_hifreq" >> $TUNED
+					cecho "1500000" $i/inter_hifreq;
 				fi
 				if [ -e "$i/inter_lofreq" ]; then
-					$busybox echo "${MIN_CPU_FREQ[$a]}" > "$i/inter_lofreq";
-					$busybox echo "inter_lofreq" >> $TUNED
+					cecho "$MIN_FREQ_0" $i/inter_lofreq;
 				fi
 				if [ -e "$i/inter_staycycles" ]; then
-					$busybox echo "4" > "$i/inter_staycycles";
-					$busybox echo "inter_staycycles" >> $TUNED
+					cecho "4" $i/inter_staycycles;
 				fi
 				if [ -e "$i/staycycles_resetfreq" ]; then
-					$busybox echo "1100000" > "$i/staycycles_resetfreq";
-					$busybox echo "statcycles_resetfreq" >> $TUNED
+					cecho "1100000" $i/staycycles_resetfreq;
 				fi
 				if [ -e "$i/input_boost_duration" ]; then
-					$busybox echo "0" > "$i/input_boost_duration";
-					$busybox echo "input_boost_duration" >> $TUNED
-				fi
-				if [ -e "$i/input_boost_duration" ]; then
-					$busybox echo "0" > "$i/input_boost_duration";
-					$busybox echo "input_boost_duration" >> $TUNED
+					cecho "0" $i/input_boost_duration;
 				fi
 				if [ -e "$i/sampling_easy_factor" ]; then
-					$busybox echo "2" > "$i/sampling_easy_factor";
-					$busybox echo "sampling_easy_factor" >> $TUNED
+					cecho "2" $i/sampling_easy_factor;
 				fi
 				if [ -e "$i/sampling_interim_factor" ]; then
-					$busybox echo "3" > "$i/sampling_interim_factor";
-					$busybox echo "sampling_interim_factor" >> $TUNED
+					cecho "3" $i/sampling_interim_factor;
 				fi
 				if [ -e "$i/ui_sampling_rate" ]; then
-					$busybox echo "45000" > "$i/ui_sampling_rate";
-					$busybox echo "ui_sampling_rate" >> $TUNED
+					cecho "45000" $i/ui_sampling_rate;
 				fi
 				if [ -e "$i/ui_timeout" ]; then
-					$busybox echo "40" > "$i/ui_timeout";
-					$busybox echo "ui_timeout" >> $TUNED
+					cecho "40" $i/ui_timeout;
 				fi
 				if [ -e "$i/down_sample_time" ]; then
-					$busybox echo "10000" > "$i/down_sample_time";
-					$busybox echo "down_sample_time" >> $TUNED
+					cecho "10000" $i/down_sample_time;
 				fi
 				if [ -e "$i/up_sample_time" ]; then
-					$busybox echo "50000" > "$i/up_sample_time";
-					$busybox echo "up_sample_time" >> $TUNED
+					cecho "50000" $i/up_sample_time;
 				fi
 				if [ -e "$i/active_floor_freq" ]; then
-					$busybox echo "${MIN_CPU_FREQ[$a]}" > "$i/active_floor_freq";
-					$busybox echo "active_floor_freq" >> $TUNED
+					cecho "$MIN_FREQ_0" $i/active_floor_freq;
 				fi
 				if [ -e "$i/powersave" ]; then
-					$busybox echo "0" > "$i/powersave";
-					$busybox echo "powesave" >> $TUNED
+					cecho "0" $i/powersave;
 				fi
 				if [ -e "$i/fastlane" ]; then
-					$busybox echo "0" > "$i/fastlane";
-					$busybox echo "fastlane" >> $TUNED
+					cecho "0" $i/fastlane;
 				fi
 				if [ -e "$i/input_boost_freq" ]; then
-					$busybox echo "600000" > "$i/input_boost_freq";
-					$busybox echo "input_boost_freq" >> $TUNED
+					cecho "600000" $i/input_boost_freq;
 				fi
 				if [ -e "$i/low_load_down_threshold" ]; then
-					$busybox echo "10" > "$i/low_load_down_threshold";
-					$busybox echo "low_load_down_threshold" >> $TUNED
+					cecho "10" $i/low_load_down_threshold;
 				fi
-				if [ ${CUR_GOVERNOR[$a]} = "zzmoove" ]; then
+				if [ "${cur_gov[$ga]}" = "zzmoove" ]; then
 					if [ -s $i/profile_number ]; then
 						pn=$($busybox cat $i/profile_number)
-						if [ $pn -ne 0 ]; then
-							$busybox echo "0" > "$i/profile_number";
+						if [ "$pn" -ne 0 ]; then
+							cecho "0" $i/profile_number;
 						fi
-					fi 
+					fi
 					if [ -e "$i/afs_threshold1" ]; then
-						$busybox echo "20" > "$i/afs_threshold1";
+						cecho "20" $i/afs_threshold1;
 					fi
 					if [ -e "$i/afs_threshold2" ]; then
-						$busybox echo "40" > "$i/afs_threshold2";
+						cecho "40" $i/afs_threshold2;
 					fi
 					if [ -e "$i/afs_threshold3" ]; then
-						$busybox echo "60" > "$i/afs_threshold3";
+						cecho "60" $i/afs_threshold3;
 					fi
 					if [ -e "$i/afs_threshold4" ]; then
-						$busybox echo "75" > "$i/afs_threshold4";
+						cecho "75" $i/afs_threshold4;
 					fi
 					if [ -e "$i/auto_adjust_freq_threshold" ]; then
-						$busybox echo "0" > "$i/auto_adjust_freq_threshold";
+						cecho "0" $i/auto_adjust_freq_threshold;
 					fi
 					if [ -e "$i/block_down_multiplier_hotplug1" ]; then
-						$busybox echo "1" > "$i/block_down_multiplier_hotplug1";
+						cecho "1" $i/block_down_multiplier_hotplug1;
 					fi
 					if [ -e "$i/block_down_multiplier_hotplug2" ]; then
-						$busybox echo "1" > "$i/block_down_multiplier_hotplug2";
+						cecho "1" $i/block_down_multiplier_hotplug2;
 					fi
 					if [ -e "$i/block_down_multiplier_hotplug3" ]; then
-						$busybox echo "1" > "$i/block_down_multiplier_hotplug3";
+						cecho "1" $i/block_down_multiplier_hotplug3;
 					fi
 					if [ -e "$i/block_down_multiplier_hotplug4" ]; then
-						$busybox echo "1" > "$i/block_down_multiplier_hotplug4";
+						cecho "1" $i/block_down_multiplier_hotplug4;
 					fi
 					if [ -e "$i/down_threshold" ]; then
-						$busybox echo "30" > "$i/down_threshold";
+						cecho "30" $i/down_threshold;
 					fi
 					if [ -e "$i/down_threshold_hotplug1" ]; then
-						$busybox echo "35" > "$i/down_threshold_hotplug1";
+						cecho "35" $i/down_threshold_hotplug1;
 					fi
 					if [ -e "$i/down_threshold_hotplug2" ]; then
-						$busybox echo "50" > "$i/down_threshold_hotplug2";
+						cecho "50" $i/down_threshold_hotplug2;
 					fi
 					if [ -e "$i/down_threshold_hotplug3" ]; then
-						$busybox echo "65" > "$i/down_threshold_hotplug3";
+						cecho "65" $i/down_threshold_hotplug3;
 					fi
 					if [ -e "$i/down_threshold_sleep" ]; then
-						$busybox echo "65" > "$i/down_threshold_sleep";
+						cecho "65" $i/down_threshold_sleep;
 					fi
 					if [ -e "$i/early_demand" ]; then
-						$busybox echo "0" > "$i/early_demand";
+						cecho "0" $i/early_demand;
 					fi
 					if [ -e "$i/early_demand_sleep" ]; then
-						$busybox echo "0" > "$i/early_demand_sleep";
+						cecho "0" $i/early_demand_sleep;
 					fi
 					if [ -e "$i/fast_scaling_down" ]; then
-						$busybox echo "4" > "$i/fast_scaling_down";
+						cecho "4" $i/fast_scaling_down;
 					fi
 					if [ -e "$i/fast_scaling_down_sleep" ]; then
-						$busybox echo "6" > "$i/fast_scaling_down_sleep";
+						cecho "6" $i/fast_scaling_down_sleep;
 					fi
 					if [ -e "$i/fast_scaling_up_sleep" ]; then
-						$busybox echo "0" > "$i/fast_scaling_up_sleep";
+						cecho "0" $i/fast_scaling_up_sleep;
 					fi
 					if [ -e "$i/fast_scaling_up" ]; then
-						$busybox echo "2" > "$i/fast_scaling_up";
+						cecho "2" $i/fast_scaling_up;
 					fi
 					if [ -e "$i/freq_limit" ]; then
-						$busybox echo "0" > "$i/freq_limit";
+						cecho "0" $i/freq_limit;
 					fi
 					if [ -e "$i/freq_limit_sleep" ]; then
-						$busybox echo "900000" > "$i/freq_limit_sleep";
+						cecho "900000" $i/freq_limit_sleep;
 					fi
 					if [ -e "$i/grad_up_threshold" ]; then
-						$busybox echo "50" > "$i/grad_up_threshold";
+						cecho "50" $i/grad_up_threshold;
 					fi
 					if [ -e "$i/grad_up_threshold_sleep" ]; then
-						$busybox echo "80" > "$i/grad_up_threshold_sleep";
+						cecho "80" $i/grad_up_threshold_sleep;
 					fi
 					if [ -e "$i/hotplug_block_down_cycles" ]; then
-						$busybox echo "0" > "$i/hotplug_block_down_cycles";
+						cecho "0" $i/hotplug_block_down_cycles;
 					fi
 					if [ -e "$i/hotplug__block_up_cycles" ]; then
-						$busybox echo "0" > "$i/hotplug_block_up_cycles";
+						cecho "0" $i/hotplug_block_up_cycles;
 					fi
 					if [ -e "$i/hotplug_engage_freq" ]; then
-						$busybox echo "0" > "$i/hotplug_engage_freq";
+						cecho "0" $i/hotplug_engage_freq;
 					fi
 					if [ -e "$i/hotplug_idle_freq" ]; then
-						$busybox echo "0" > "$i/hotplug_idle_freq";
+						cecho "0" $i/hotplug_idle_freq;
 					fi
 					if [ -e "$i/hotplug_idle_threshold" ]; then
-						$busybox echo "0" > "$i/hotplug_idle_threshold";
+						cecho "0" $i/hotplug_idle_threshold;
 					fi
 					if [ -e "$i/hotplug_lock" ]; then
-						$busybox echo "0" > "$i/hotplug_lock";
+						cecho "0" $i/hotplug_lock;
 					fi
 					if [ -e "$i/hotplug_max_limit" ]; then
-						$busybox echo "0" > "$i/hotplug_max_limit";
+						cecho "0" $i/hotplug_max_limit;
 					fi
 					if [ -e "$i/hotplug_min_limit" ]; then
-						$busybox echo "0" > "$i/hotplug_min_limit";
+						cecho "0" $i/hotplug_min_limit;
 					fi
 					if [ -e "$i/hotplug_sleep" ]; then
-						$busybox echo "0" > "$i/hotplug_sleep";
+						cecho "0" $i/hotplug_sleep;
 					fi
 					if [ -e "$i/hotplug_stagger_down" ]; then
-						$busybox echo "0" > "$i/hotplug_stagger_down";
+						cecho "0" $i/hotplug_stagger_down;
 					fi
 					if [ -e "$i/hotplug_stagger_up" ]; then
-						$busybox echo "0" > "$i/hotplug_stagger_up";
+						cecho "0" $i/hotplug_stagger_up;
 					fi
 					if [ -e "$i/ignore_nice_load" ]; then
-						$busybox echo "1" > "$i/ignore_nice_load";
+						cecho "1" $i/ignore_nice_load;
 					fi
 					if [ -e "$i/inputboost_cycles" ]; then
-						$busybox echo "0" > "$i/inputboost_cycles";
+						cecho "0" $i/inputboost_cycles;
 					fi
 					if [ -e "$i/inputboost_punch_cycles" ]; then
-						$busybox echo "0" > "$i/inputboost_punch_cycles";
+						cecho "0" $i/inputboost_punch_cycles;
 					fi
 					if [ -e "$i/inputboost_punch_freq" ]; then
-						$busybox echo "0" > "$i/inputboost_punch_freq";
+						cecho "0" $i/inputboost_punch_freq;
 					fi
 					if [ -e "$i/inputboost_punch_on_epenmove" ]; then
-						$busybox echo "0" > "$i/inputboost_punch_on_epenmove";
+						cecho "0" $i/inputboost_punch_on_epenmove;
 					fi
 					if [ -e "$i/inputboost_punch_on_fingerdown" ]; then
-						$busybox echo "0" > "$i/inputboost_punch_on_fingerdown";
+						cecho "0" $i/inputboost_punch_on_fingerdown;
 					fi
 					if [ -e "$i/inputboost_punch_on_fingermove" ]; then
-						$busybox echo "0" > "$i/inputboost_punch_on_fingermove";
+						cecho "0" $i/inputboost_punch_on_fingermove;
 					fi
 					if [ -e "$i/inputboost_typingbooster_cores" ]; then
-						$busybox echo "0" > "$i/inputboost_typingbooster_cores";
+						cecho "0" $i/inputboost_typingbooster_cores;
 					fi
 					if [ -e "$i/inputboost_typingbooster_up_threshold" ]; then
-						$busybox echo "60" > "$i/inputboost_typingbooster_up_threshold";
+						cecho "60" $i/inputboost_typingbooster_up_threshold;
 					fi
 					if [ -e "$i/inputboost_up_threshold" ]; then
-						$busybox echo "100" > "$i/inputboost_up_threshold";
+						cecho "100" $i/inputboost_up_threshold;
 					fi
 					if [ -e "$i/music_max_freq" ]; then
-						$busybox echo "600000" > "$i/music_max_freq";
+						cecho "600000" $i/music_max_freq;
 					fi
 					if [ -e "$i/music_min_cores" ]; then
-						$busybox echo "0" > "$i/music_min_cores";
+						cecho "0" $i/music_min_cores;
 					fi
 					if [ -e "$i/music_min_freq" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$a]}" > "$i/music_min_freq";
+						cecho "$MIN_FREQ_0" $i/music_min_freq;
 					fi
 					if [ -e "$i/sampling_down_factor" ]; then
-						$busybox echo "1" > "$i/sampling_down_factor";
+						cecho "1" $i/sampling_down_factor;
 					fi
 					if [ -e "$i/sampling_down_max_momentum" ]; then
-						$busybox echo "0" > "$i/sampling_down_max_momentum";
+						cecho "0" $i/sampling_down_max_momentum;
 					fi
 					if [ -e "$i/sampling_down_max_sensitivity" ]; then
-						$busybox echo "75" > "$i/sampling_down_max_sensitivity";
+						cecho "75" $i/sampling_down_max_sensitivity;
 					fi
 					if [ -e "$i/sampling_rate" ]; then
-						$busybox echo "100000" > "$i/sampling_rate";
+						cecho "100000" $i/sampling_rate;
 					fi
 					if [ -e "$i/sampling_rate_idle" ]; then
-						$busybox echo "100000" > "$i/sampling_rate_idle";
+						cecho "100000" $i/sampling_rate_idle;
 					fi
 					if [ -e "$i/sampling_rate_idle_delay" ]; then
-						$busybox echo "0" > "$i/sampling_rate_idle_delay";
+						cecho "0" $i/sampling_rate_idle_delay;
 					fi
 					if [ -e "$i/sampling_rate_idle_threshold" ]; then
-						$busybox echo "50" > "$i/sampling_rate_idle_threshold";
+						cecho "50" $i/sampling_rate_idle_threshold;
 					fi
 					if [ -e "$i/sampling_rate_sleep_multiplier" ]; then
-						$busybox echo "2" > "$i/sampling_rate_sleep_multiplier";
+						cecho "2" $i/sampling_rate_sleep_multiplier;
 					fi
 					if [ -e "$i/scaling_block_cycles" ]; then
-						$busybox echo "0" > "$i/scaling_block_cycles";
+						cecho "0" $i/scaling_block_cycles;
 					fi
 					if [ -e "$i/scaling_block_force_down" ]; then
-						$busybox echo "0" > "$i/scaling_block_force_down";
+						cecho "0" $i/scaling_block_force_down;
 					fi
 					if [ -e "$i/scaling_block_freq" ]; then
-						$busybox echo "0" > "$i/scaling_block_freq";
+						cecho "0" $i/scaling_block_freq;
 					fi
 					if [ -e "$i/scaling_block_threshold" ]; then
-						$busybox echo "0" > "$i/scaling_block_threshold";
+						cecho "0" $i/scaling_block_threshold;
 					fi
 					if [ -e "$i/scaling_fastdown_down_threshold" ]; then
-						$busybox echo "0" > "$i/scaling_fastdown_down_threshold";
+						cecho "0" $i/scaling_fastdown_down_threshold;
 					fi
 					if [ -e "$i/scaling_fastdown_freq" ]; then
-						$busybox echo "0" > "$i/scaling_fastdown_freq";
+						cecho "0" $i/scaling_fastdown_freq;
 					fi
 					if [ -e "$i/scaling_fastdown_up_threshold" ]; then
-						$busybox echo "0" > "$i/scaling_fastdown_up_threshold";
+						cecho "0" $i/scaling_fastdown_up_threshold;
 					fi
 					if [ -e "$i/scaling_proportional" ]; then
-						$busybox echo "0" > "$i/scaling_proportional";
+						cecho "0" $i/scaling_proportional;
 					fi
 					if [ -e "$i/scaling_responsiveness_freq" ]; then
-						$busybox echo "0" > "$i/scaling_responsiveness_freq";
+						cecho "0" $i/scaling_responsiveness_freq;
 					fi
 					if [ -e "$i/scaling_responsiveness_up_threshold" ]; then
-						$busybox echo "0" > "$i/scaling_responsiveness_up_threshold";
+						cecho "0" $i/scaling_responsiveness_up_threshold;
 					fi
 					if [ -e "$i/scaling_up_block_cycles" ]; then
-						$busybox echo "5" > "$i/scaling_up_block_cycles";
+						cecho "5" $i/scaling_up_block_cycles;
 					fi
 					if [ -e "$i/scaling_up_block_freq" ]; then
-						$busybox echo "1900000" > "$i/scaling_up_block_freq";
+						cecho "1900000" $i/scaling_up_block_freq;
 					fi
 					if [ -e "$i/smooth_up" ]; then
-						$busybox echo "75" > "$i/smooth_up";
+						cecho "75" $i/smooth_up;
 					fi
 					if [ -e "$i/smooth_up_sleep" ]; then
-						$busybox echo "100" > "$i/smooth_up_sleep";
+						cecho "100" $i/smooth_up_sleep;
 					fi
 					if [ -e "$i/up_threshold" ]; then
-						$busybox echo "50" > "$i/up_threshold";
+						cecho "50" $i/up_threshold;
 					fi
 					if [ -e "$i/up_threshold_hotplug1" ]; then
-						$busybox echo "25" > "$i/up_threshold_hotplug1";
+						cecho "25" $i/up_threshold_hotplug1;
 					fi
 					if [ -e "$i/up_threshold_hotplug2" ]; then
-						$busybox echo "40" > "$i/up_threshold_hotplug2";
+						cecho "40" $i/up_threshold_hotplug2;
 					fi
 					if [ -e "$i/up_threshold_hotplug3" ]; then
-						$busybox echo "75" > "$i/up_threshold_hotplug3";
+						cecho "75" $i/up_threshold_hotplug3;
 					fi
 					if [ -e "$i/up_threshold_hotplug_freq1" ]; then
-						$busybox echo "0" > "$i/up_threshold_hotplug_freq1";
+						cecho "0" $i/up_threshold_hotplug_freq1;
 					fi
 					if [ -e "$i/up_threshold_hotplug_freq2" ]; then
-						$busybox echo "0" > "$i/up_threshold_hotplug_freq2";
+						cecho "0" $i/up_threshold_hotplug_freq2;
 					fi
 					if [ -e "$i/up_threshold_hotplug_freq3" ]; then
-						$busybox echo "0" > "$i/up_threshold_hotplug_freq3";
+						cecho "0" $i/up_threshold_hotplug_freq3;
 					fi
 					if [ -e "$i/up_threshold_sleep" ]; then
-						$busybox echo "90" > "$i/up_threshold_sleep";
+						cecho "90" $i/up_threshold_sleep;
 					fi
-					echo "Zzmoove has too many tunables. You better check at Kernel Adiutor - CPU - Governor Tunables" >> $TUNED
 				fi
+				if [ "$core_ctl" -eq 1 ]; then
+				   ga=$((ga+1))
+				    if [ "$ga" -eq 4 ]; then
+				      echo "Breaking small cluster"
+					  break 1
+					fi
+                fi
 			done
 		fi
 		#For MIDDLE cluster
-		if [ ${#CLUSTER[@]} -eq 3 ]; then
-			if [ -d ${GOVERNOR[$b]} ]; then
-				TL_1=$((${MIN_CPU_FREQ[$b]} + (${CDF[$b]} - 50000)))
-				TL_2=$(($TL_1 + (${CDF[$b]} - 40000)))
-				TL_3=$(($TL_2 + (${CDF[$b]} - 30000)))
-				TL_4=$(($TL_3 + (${CDF[$b]} - 20000)))
-				TL_5=$(($TL_4 + ${CDF[$b]}))
-				TL_6=$(($TL_5 + ${CDF[$b]}))
-				TL_7=$(($TL_6 + (${CDF[$b]} + 20000)))
-				TL_8=$(($TL_7 + ${CDF[$b]}))
-				TL_9=$(($TL_8 + (${CDF[$b]} + 50000)))
-				for i in ${GOVERNOR[$b]}; do
-					if [ "$CD" -eq 3 ]; then
-						break 1
-						$busybox echo "GT does not support your big cluster right now"
-					fi
-					if [ $bigLITTLE -eq 1 ]; then
-						if [ ${#CLUSTER[@]} -eq 3 ]; then
-							if [ $IN -eq 0 ]; then
-								if [ $i = ${GOVERNOR[0]} ]; then
-									$busybox echo -e "\e[01;37m Governor LITTLE core: ${CUR_GOVERNOR[0]} \e[00;37m" >> $TUNED
-								elif [ $i = ${GOVERNOR[1]} ]; then
-									$busybox echo -e "\e[01;37m Governor Middle core: ${CUR_GOVERNOR[1]} \e[00;37m" >> $TUNED
-								else
-									$busybox echo -e "\e[01;37m Governor big core:    ${CUR_GOVERNOR[2]} \e[00;37m" >> $TUNED
-								fi
-							else
-								if [ $i = ${GOVERNOR[2]} ]; then
-									$busybox echo -e "\e[01;37m Governor LITTLE core: ${CUR_GOVERNOR[2]} \e[00;37m" >> $TUNED
-								elif [ $i = ${GOVERNOR[1]} ]; then
-									$busybox echo -e "\e[01;37m Governor Middle core: ${CUR_GOVERNOR[1]} \e[00;37m" >> $TUNED
-								else
-									$busybox echo -e "\e[01;37m Governor big core:    ${CUR_GOVERNOR[0]} \e[00;37m" >> $TUNED
-								fi
-							fi
-						else
-							if [ $IN -eq 0 ]; then
-								if [ $i = ${GOVERNOR[0]} ]; then
-									$busybox echo -e "\e[01;37m Governor LITTLE core: ${CUR_GOVERNOR[0]} \e[00;37m" >> $TUNED
-								else
-									$busybox echo -e "\e[01;37m Governor big core:    ${CUR_GOVERNOR[1]} \e[00;37m" >> $TUNED
-								fi
-							else
-								if [ $i = ${GOVERNOR[1]} ]; then
-									$busybox echo -e "\e[01;37m Governor LITTLE core: ${CUR_GOVERNOR[1]} \e[00;37m" >> $TUNED
-								else
-									$busybox echo -e "\e[01;37m Governor big core:    ${CUR_GOVERNOR[0]} \e[00;37m" >> $TUNED
-								fi
-							fi
-						fi
-					else
-						$busybox echo -e "\e[01;37m Governor: ${CUR_GOVERNOR[0]} \e[00;37m" >> $TUNED
-					fi
+		if [ "$TC" -eq 3 ]; then
+			if [ -d ${gov[$gb]} ]; then
+				#TL_0 for only hispeed_freq
+				TL_0=$((${IP[1]} * 11))
+				TL_1=$(($MIN_FREQ_1 + (${IP[1]} * 3)))
+				TL_2=$(($TL_1 + ${CDF[1]} + (${IP[1]} * 2)))
+				TL_3=$(($TL_2 + ${CDF[1]} + ${IP[1]}))
+				TL_4=$(($TL_3 + (${CDF[1]} * 2)))
+				TL_5=$(($TL_4 + (${CDF[1]} * 2)))
+				TL_6=$(($TL_5 + ${CDF[1]}))
+				TL_7=$(($TL_6 + ${CDF[1]}))
+				TL_8=$(($TL_7 + ${CDF[1]}))
+				TL_9=$(($TL_8 + ${CDF[1]}))
+				for i in ${gov[$gb]}; do
+				if [ "$bL" -eq 1 ]; then
+								$busybox echo -e "\e[01;37m Governor MIDDLE core: ${cur_gov[$ga]} \e[00;37m" >> $TUNED
+								$busybox echo -e "\e[01;37m Governor MIDDLE core: ${cur_gov[$ga]} \e[00;37m" >> $TWEAKED
+				fi
+				if [ "$SC" -eq 1 ] || [ "$REG" -eq 1 ]; then
+				   $busybox echo -e "\e[01;37m Governor: ${cur_gov[$ga]} \e[00;37m" >> $TUNED
+				   $busybox echo -e "\e[01;37m Governor: ${cur_gov[$ga]} \e[00;37m" >> $TWEAKED
+				fi
 					chmod 644 $i/*
 					if [ -e "$i/above_hispeed_delay" ]; then
-						$busybox echo "20000 1900000:50000" > "$i/above_hispeed_delay";
-						$busybox echo "above_hispeed_delay" >> $TUNED
+						cecho "20000 1900000:50000" $i/above_hispeed_delay;
 					fi
 					if [ -e "$i/boost" ]; then
-						$busybox echo "0" > "$i/boost";
-						$busybox echo "boost" >> $TUNED
-					fi
-					if [ -e "$i/boostpulse" ]; then
-						$busybox echo "0" > "$i/boostpulse";
-						$busybox echo "boostpulse" >> $TUNED
+						cecho "0" $i/boost;
 					fi
 					if [ -e "$i/boostpulse_duration" ]; then
-						$busybox echo "0" > "$i/boostpulse_duration";
-						$busybox echo "boostpulse_duration" >> $TUNED
+						cecho "0" $i/boostpulse_duration;
 					fi
 					if [ -e "$i/go_hispeed_load" ]; then
-						if [ ${CDF[$b]} -lt 150000 ] && [ ${CDF[$b]} -gt 110000 ]; then
-							$busybox echo "87" > "$i/go_hispeed_load";
-						elif [ ${CDF[$b]} -lt 110000 ] && [ ${CDF[$b]} -gt 0 ]; then
-							$busybox echo "75" > "$i/go_hispeed_load";
+						if [ "${CDF[1]}" -lt 150000 ] && [ "${CDF[1]}" -gt 110000 ]; then
+							cecho "87" $i/go_hispeed_load;
+						elif [ "${CDF[1]}" -lt 110000 ] && [ "${CDF[1]}" -gt 0 ]; then
+							cecho "75" $i/go_hispeed_load;
 						else
-							$busybox echo "99" > "$i/go_hispeed_load";
-							$busybox echo "go_hispeed_load" >> $TUNED
+							cecho "99" $i/go_hispeed_load;
 						fi
 					fi
 					if [ -e "$i/hispeed_freq" ]; then
-						#Selecting the closest actual frequency to TL_$X
-						Q=0
-						if [ -e  ${FREQ_SOURCE[$b]} ] && [ $CD -ne 3 ]; then
-							while true; do
-								R=$($busybox cat ${FREQ_SOURCE[$b]} | cut -d ' ' -f$Q)
-								if [ $TL_6 -lt $R ]; then
-									S=$R
-									break
-								fi
-								Q=$(($Q + 1))
-							done
-							$busybox echo "$S" > "$i/hispeed_freq";
-							$busybox echo "hispeed_freq" >> $TUNED
-						fi
+							cecho "$((${HSF[1]} + $MIN_FREQ_1))" $i/hispeed_freq;
+							$busybox echo "MIDDLE $((${HSF[1]} + $MIN_FREQ_1))"
+							$busybox sleep 1
 					fi
 					if [ -e "$i/max_freq_hysteresis" ]; then
-						$busybox echo "0" > "$i/max_freq_hysteresis";
-						$busybox echo "max_freq_hysteresis" >> $TUNED
+						cecho "0" $i/max_freq_hysteresis;
 					fi
 					if [ -e "$i/align_windows" ]; then
-						$busybox echo "0" > "$i/align_windows";
-						$busybox echo "align_windows" >> $TUNED
+						cecho "0" $i/align_windows;
 					fi
 					if [ -e "$i/io_is_busy" ]; then
-						$busybox echo "1" > "$i/io_is_busy";
-						$busybox echo "io_is_busy" >> $TUNED
+						cecho "1" $i/io_is_busy;
 					fi
 					if [ -e "$i/min_sample_time" ]; then
-						$busybox echo "50000" > "$i/min_sample_time";
-						$busybox echo "min_sample_time" >> $TUNED
+						cecho "50000" $i/min_sample_time;
 					fi
 					if [ -e "$i/sampling_down_factor" ]; then
-						$busybox echo "1" > "$i/sampling_down_factor";
-						$busybox echo "sampling_down_factor" >> $TUNED
+						cecho "1" $i/sampling_down_factor;
 					fi
 					if [ -e "$i/target_loads" ]; then
-						$busybox echo "0 ${MIN_CPU_FREQ[$b]}:10 $TL_1:20 $TL_2:30 $TL_3:40 $TL_4:45 $TL_5:50 $TL_6:60 $TL_7:70 $TL_8:85 $TL_9:95" > "$i/target_loads";
-						$busybox echo "target_loads" >> $TUNED
+						cecho "0 $MIN_FREQ_1:10 $TL_1:20 $TL_2:30 $TL_3:40 $TL_4:45 $TL_5:50 $TL_6:60 $TL_7:70 $TL_8:85 $TL_9:95" $i/target_loads;
 					fi
 					if [ -e "$i/timer_rate" ]; then
-						$busybox echo "20000" > "$i/timer_rate";
-						$busybox echo "timer_rate" >> $TUNED
+						cecho "20000" $i/timer_rate;
 					fi
 					if [ -e "$i/timer_slack" ]; then
-						$busybox echo "0" > "$i/timer_slack";
-						$busybox echo "timer_slack" >> $TUNED
+						cecho "0" $i/timer_slack;
 					fi
 					if [ -e "$i/up_threshold_any_cpu_freq" ]; then
-						$busybox echo "0" > "$i/up_threshold_any_cpu_freq";
-						$busybox echo "up_threshold_any_cpu_freq" >> $TUNED
+						cecho "0" $i/up_threshold_any_cpu_freq;
 					fi
 					if [ -e "$i/up_threshold_any_cpu_load" ]; then
-						$busybox echo "0" > "$i/up_threshold_any_cpu_load";
-						$busybox echo "up_threshold_any_cpu_load" >> $TUNED
+						cecho "0" $i/up_threshold_any_cpu_load;
 					fi
 					if [ -e "$i/down_threshold" ]; then
-						$busybox echo "40" > "$i/down_threshold";
-						$busybox echo "down_threshold" >> $TUNED
+						cecho "40" $i/down_threshold;
 					fi
 					if [ -e "$i/freq_step" ]; then
-						$busybox echo "30" > "$i/freq_step";
-						$busybox echo "freq_step" >> $TUNED
+						cecho "30" $i/freq_step;
 					fi
 					if [ -e "$i/ignore_nice_load" ]; then
-						$busybox echo "1" > "$i/ignore_nice_load";
-						$busybox echo "ignore_nice_load" >> $TUNED
+						cecho "1" $i/ignore_nice_load;
 					fi
-					if [ -e "$i/sampling_rate" ] && [ "${CUR_GOVERNOR[$b]}" != "conservative" ]; then
-						$busybox echo "45000" > "$i/sampling_rate";
-						$busybox echo "sampling_rate" >> $TUNED
+					if [ -e "$i/sampling_rate" ] && [[ "${cur_gov[$gb]}" != "conservative" && "${cur_gov[$gb]}" != "lionfish" ]]; then
+						cecho "30000" $i/sampling_rate;
 					fi
-					if [ -e "$i/sampling_rate_min" ] && [ "${CUR_GOVERNOR[$b]}" != "conservative" ]; then
-						$busybox echo "30000" > "$i/sampling_rate_min";
-						$busybox echo "sampling_rate_min" >> $TUNED
+					if [ -e "$i/sampling_rate_min" ] && [[ "${cur_gov[$gb]}" != "conservative" && "${cur_gov[$gb]}" != "ondemand" && "${cur_gov[$gb]}" != "lionfish" ]]; then
+						cecho "10000" $i/sampling_rate_min;
 					fi
 					if [ -e "$i/up_threshold" ]; then
-						$busybox echo "53" > "$i/up_threshold";
-						$busybox echo "up_threshold" >> $TUNED
+						cecho "53" $i/up_threshold;
 					fi
 					if [ -e "$i/sync_freq" ]; then
-						$busybox echo "0" > "$i/sync_freq";
-						$busybox echo "sync_freq" >> $TUNED
+						cecho "$MIN_FREQ_1" $i/sync_freq;
 					fi
 					if [ -e "$i/two_phase_freq" ]; then
-						$busybox echo "960000,960000,960000,960000" > "$i/two_phase_freq";
-						$busybox echo "two_phase_freq" >> $TUNED
+						cecho "960000,960000,960000,960000" $i/two_phase_freq;
 					fi
 					if [ -e "$i/jump_level" ]; then
-						$busybox echo "1000000" > "$i/jump_level";
-						$busybox echo "jump_level" >> $TUNED
+						cecho "1000000" $i/jump_level;
 					fi
 					if [ -e "$i/jump_threshold" ]; then
-						$busybox echo "60" > "$i/jump_threshold";
-						$busybox echo "jump_threshold" >> $TUNED
+						cecho "60" $i/jump_threshold;
 					fi
 					if [ -e "$i/powersave_bias" ]; then
-						$busybox echo "0" > "$i/powersave_bias";
-						$busybox echo "powersave_bias" >> $TUNED
+						cecho "0" $i/powersave_bias;
 					fi
 					if [ -e "$i/down_differential" ]; then
-						$busybox echo "8" > "$i/down_differential";
-						$busybox echo "down_differential" >> $TUNED
+						cecho "8" $i/down_differential;
 					fi
 					if [ -e "$i/second_phase_freq" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$b]}" > "$i/second_phase_freq";
-						$busybox echo "second_phase_freq" >> $TUNED
+						cecho "$MIN_FREQ_1" $i/second_phase_freq;
 					fi
 					if [ -e "$i/boostfreq" ]; then
-						$busybox echo "0" > "$i/boostfreq";
-						$busybox echo "boostfreq" >> $TUNED
+						cecho "0" $i/boostfreq;
 					fi
 					if [ -e "$i/micro_freq_up_threshold" ]; then
-						$busybox echo "65" > "$i/micro_freq_up_threshold";
-						$busybox echo "micro_freq_up_threshold" >> $TUNED
+						cecho "65" $i/micro_freq_up_threshold;
 					fi
 					if [ -e "$i/up_threshold_min_freq" ]; then
-						$busybox echo "600000" > "$i/up_threshold_min_freq";
-						$busybox echo "up_threshold_min_freq" >> $TUNED
+						cecho "600000" $i/up_threshold_min_freq;
 					fi
 					if [ -e "$i/ba_lock" ]; then
-						$busybox echo "0" > "$i/ba_lock";
-						$busybox echo "ba_lock" >> $TUNED
+						cecho "0" $i/ba_lock;
 					fi
 					if [ -e "$i/down_differential_multi_core" ]; then
-						$busybox echo "35" > "$i/down_differential_multi_core";
-						$busybox echo "down_differential_multi_core" >> $TUNED
+						cecho "35" $i/down_differential_multi_core;
 					fi
 					if [ -e "$i/freq_down_step" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$b]}" > "$i/freq_down_step";
-						$busybox echo "freq_down_step" >> $TUNED
+						cecho "$MIN_FREQ_1" $i/freq_down_step;
 					fi
 					if [ -e "$i/freq_down_step_barrier" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$b]}" > "$i/freq_down_step_barrier";
-						$busybox echo "freq_down_step_barrier" >> $TUNED
+						cecho "$MIN_FREQ_1" $i/freq_down_step_barrier;
 					fi
 					if [ -e "$i/input_event_min_freq" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$b]}, ${MIN_CPU_FREQ[$b]}, ${MIN_CPU_FREQ[$b]}, ${MIN_CPU_FREQ[$b]}" > "$i/input_event_min_freq";
-						$busybox echo "input_event_min_freq" >> $TUNED
+						cecho "$MIN_FREQ_1, $MIN_FREQ_1, $MIN_FREQ_1, $MIN_FREQ_1" $i/input_event_min_freq;
 					fi
 					if [ -e "$i/optimal_freq" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$b]}" > "$i/optimal_freq";
-						$busybox echo "optimal_freq" >> $TUNED
+						cecho "$MIN_FREQ_1" $i/optimal_freq;
 					fi
 					if [ -e "$i/shortcut" ]; then
-						$busybox echo "0" > "$i/shortcut";
-						$busybox echo "shortcut" >> $TUNED
+						cecho "0" $i/shortcut;
 					fi
 					if [ -e "$i/up_threshold_multi_core" ]; then
-						$busybox echo "0" > "$i/up_threshold_multi_core";
-						$busybox echo "up_threshold_multi_core" >> $TUNED
+						cecho "0" $i/up_threshold_multi_core;
 					fi
 					if [ -e "$i/freq_responsiveness" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$b]}" > "$i/freq_responsiveness";
-						$busybox echo "freq_responsiveness" >> $TUNED
+						cecho "$MIN_FREQ_1" $i/freq_responsiveness;
 					fi
 					if [ -e "$i/awake_ideal_freq" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$b]}" > "$i/awake_ideal_freq";
-						$busybox echo "awake_ideal_freq" >> $TUNED
+						cecho "$MIN_FREQ_1" $i/awake_ideal_freq;
 					fi
 					if [ -e "$i/boost_duration" ]; then
-						$busybox echo "0" > "$i/boost_duration";
-						$busybox echo "boost_duration" >> $TUNED
+						cecho "0" $i/boost_duration;
 					fi
 					if [ -e "$i/boost_freq" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$b]}" > "$i/boost_freq";
-						$busybox echo "boost_freq" >> $TUNED
+						cecho "$MIN_FREQ_1" $i/boost_freq;
 					fi
 					if [ -e "$i/debug_mask" ]; then
-						$busybox echo "32" > "$i/debug_mask";
-						$busybox echo "debug_mask" >> $TUNED
+						cecho "32" $i/debug_mask;
 					fi
 					if [ -e "$i/down_rate" ]; then
-						$busybox echo "10000" > "$i/down_rate";
-						$busybox echo "down_rate" >> $TUNED
+						cecho "10000" $i/down_rate;
 					fi
 					if [ -e "$i/ignore_nice" ]; then
-						$busybox echo "0" > "$i/ignore_nice";
-						$busybox echo "ignore_nice" >> $TUNED
+						cecho "0" $i/ignore_nice;
 					fi
 					if [ -e "$i/input_boost_duration" ]; then
-						$busybox echo "0" > "$i/input_boost_duration";
-						$busybox echo "input_boost_duration" >> $TUNED
+						cecho "0" $i/input_boost_duration;
 					fi
 					if [ -e "$i/max_cpu_load" ]; then
-						$busybox echo "100" > "$i/max_cpu_load";
-						$busybox echo "max_cpu_load" >> $TUNED
+						cecho "100" $i/max_cpu_load;
 					fi
 					if [ -e "$i/min_cpu_load" ]; then
-						$busybox echo "5" > "$i/min_cpu_load";
-						$busybox echo "min_cpu_load" >> $TUNED
+						cecho "5" $i/min_cpu_load;
 					fi
 					if [ -e "$i/min_sampling_rate" ]; then
-						$busybox echo "20000" > "$i/min_sampling_rate";
-						$busybox echo "min_sampling_rate" >> $TUNED
+						cecho "20000" $i/min_sampling_rate;
 					fi
 					if [ -e "$i/ramp_down_step" ]; then
-						$busybox echo "162000" > "$i/ramp_down_step";
-						$busybox echo "ramp_down_step" >> $TUNED
+						cecho "162000" $i/ramp_down_step;
 					fi
 					if [ -e "$i/ramp_up_during_boost" ]; then
-						$busybox echo "0" > "$i/ramp_up_during_boost";
-						$busybox echo "ramp_up_during_boost" >> $TUNED
+						cecho "0" $i/ramp_up_during_boost;
 					fi
 					if [ -e "$i/ramp_up_step" ]; then
-						$busybox echo "100000" > "$i/ramp_up_step";
-						$busybox echo "ramp_up_step" >> $TUNED
+						cecho "100000" $i/ramp_up_step;
 					fi
 					if [ -e "$i/suspend_ideal_freq" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$b]}" > "$i/suspend_ideal_freq";
-						$busybox echo "suspend_ideal_freq" >> $TUNED
+						cecho "$MIN_FREQ_1" $i/suspend_ideal_freq;
 					fi
 					if [ -e "$i/touch_poke_freq" ]; then
-						$busybox echo "0" > "$i/touch_poke_freq";
-						$busybox echo "touch_poke_freq" >> $TUNED
+						cecho "0" $i/touch_poke_freq;
 					fi
 					if [ -e "$i/up_rate" ]; then
-						$busybox echo "0" > "$i/up_rate";
-						$busybox echo "up_rate" >> $TUNED
+						cecho "0" $i/up_rate;
 					fi
 					if [ -e "$i/optimal_max_freq" ]; then
-						$busybox echo "2000000" > "$i/optimal_max_freq";
-						$busybox echo "optimal_max_freq" >> $TUNED
+						cecho "2000000" $i/optimal_max_freq;
 					fi
 					if [ -e "$i/freq_calc_thresh" ]; then
-						$busybox echo "1100000" > "$i/freq_calc_thresh";
-						$busybox echo "freq_calc_thresh" >> $TUNED
+						cecho "1100000" $i/freq_calc_thresh;
 					fi
 					if [ -e "$i/allowed_misses" ]; then
-						$busybox echo "5" > "$i/allowed_misses";
-						$busybox echo "allowed_misses" >> $TUNED
+						cecho "5" $i/allowed_misses;
 					fi
 					if [ -e "$i/target_residency" ]; then
-						$busybox echo "10000" > "$i/target_residency";
-						$busybox echo "target_residency" >> $TUNED
+						cecho "10000" $i/target_residency;
 					fi
 					if [ -e "$i/inter_hifreq" ]; then
-						$busybox echo "1500000" > "$i/inter_hifreq";
-						$busybox echo "inter_hifreq" >> $TUNED
+						cecho "1500000" $i/inter_hifreq;
 					fi
 					if [ -e "$i/inter_lofreq" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$b]}" > "$i/inter_lofreq";
-						$busybox echo "inter_lofreq" >> $TUNED
+						cecho "$MIN_FREQ_1" $i/inter_lofreq;
 					fi
 					if [ -e "$i/inter_staycycles" ]; then
-						$busybox echo "4" > "$i/inter_staycycles";
-						$busybox echo "inter_staycycles" >> $TUNED
+						cecho "4" $i/inter_staycycles;
 					fi
 					if [ -e "$i/staycycles_resetfreq" ]; then
-						$busybox echo "1100000" > "$i/staycycles_resetfreq";
-						$busybox echo "statcycles_resetfreq" >> $TUNED
+						cecho "1100000" $i/staycycles_resetfreq;
 					fi
 					if [ -e "$i/input_boost_duration" ]; then
-						$busybox echo "0" > "$i/input_boost_duration";
-						$busybox echo "input_boost_duration" >> $TUNED
-					fi
-					if [ -e "$i/input_boost_duration" ]; then
-						$busybox echo "0" > "$i/input_boost_duration";
-						$busybox echo "input_boost_duration" >> $TUNED
+						cecho "0" $i/input_boost_duration;
 					fi
 					if [ -e "$i/sampling_easy_factor" ]; then
-						$busybox echo "2" > "$i/sampling_easy_factor";
-						$busybox echo "sampling_easy_factor" >> $TUNED
+						cecho "2" $i/sampling_easy_factor;
 					fi
 					if [ -e "$i/sampling_interim_factor" ]; then
-						$busybox echo "3" > "$i/sampling_interim_factor";
-						$busybox echo "sampling_interim_factor" >> $TUNED
+						cecho "3" $i/sampling_interim_factor;
 					fi
 					if [ -e "$i/ui_sampling_rate" ]; then
-						$busybox echo "45000" > "$i/ui_sampling_rate";
-						$busybox echo "ui_sampling_rate" >> $TUNED
+						cecho "45000" $i/ui_sampling_rate;
 					fi
 					if [ -e "$i/ui_timeout" ]; then
-						$busybox echo "40" > "$i/ui_timeout";
-						$busybox echo "ui_timeout" >> $TUNED
+						cecho "40" $i/ui_timeout;
 					fi
 					if [ -e "$i/down_sample_time" ]; then
-						$busybox echo "10000" > "$i/down_sample_time";
-						$busybox echo "down_sample_time" >> $TUNED
+						cecho "10000" $i/down_sample_time;
 					fi
 					if [ -e "$i/up_sample_time" ]; then
-						$busybox echo "50000" > "$i/up_sample_time";
-						$busybox echo "up_sample_time" >> $TUNED
+						cecho "50000" $i/up_sample_time;
 					fi
 					if [ -e "$i/active_floor_freq" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$b]}" > "$i/active_floor_freq";
-						$busybox echo "active_floor_freq" >> $TUNED
+						cecho "$MIN_FREQ_1" $i/active_floor_freq;
 					fi
 					if [ -e "$i/powersave" ]; then
-						$busybox echo "0" > "$i/powersave";
-						$busybox echo "powesave" >> $TUNED
+						cecho "0" $i/powersave;
 					fi
 					if [ -e "$i/fastlane" ]; then
-						$busybox echo "0" > "$i/fastlane";
-						$busybox echo "fastlane" >> $TUNED
+						cecho "0" $i/fastlane;
 					fi
 					if [ -e "$i/input_boost_freq" ]; then
-						$busybox echo "600000" > "$i/input_boost_freq";
-						$busybox echo "input_boost_freq" >> $TUNED
+						cecho "600000" $i/input_boost_freq;
 					fi
 					if [ -e "$i/low_load_down_threshold" ]; then
-						$busybox echo "10" > "$i/low_load_down_threshold";
-						$busybox echo "low_load_down_threshold" >> $TUNED
+						cecho "10" $i/low_load_down_threshold;
 					fi
-					if [ ${CUR_GOVERNOR[$b]} = "zzmoove" ]; then
+					if [ "${cur_gov[$gb]}" = "zzmoove" ]; then
 						if [ -s $i/profile_number ]; then
 							pn=$($busybox cat $i/profile_number)
-							if [ $pn -ne 0 ]; then
-								$busybox echo "0" > "$i/profile_number";
+							if [ "$pn" -ne 0 ]; then
+								cecho "0" $i/profile_number;
 							fi
-						fi 
+						fi
 						if [ -e "$i/afs_threshold1" ]; then
-							$busybox echo "20" > "$i/afs_threshold1";
+							cecho "20" $i/afs_threshold1;
 						fi
 						if [ -e "$i/afs_threshold2" ]; then
-							$busybox echo "40" > "$i/afs_threshold2";
+							cecho "40" $i/afs_threshold2;
 						fi
 						if [ -e "$i/afs_threshold3" ]; then
-							$busybox echo "60" > "$i/afs_threshold3";
+							cecho "60" $i/afs_threshold3;
 						fi
 						if [ -e "$i/afs_threshold4" ]; then
-							$busybox echo "75" > "$i/afs_threshold4";
+							cecho "75" $i/afs_threshold4;
 						fi
 						if [ -e "$i/auto_adjust_freq_threshold" ]; then
-							$busybox echo "0" > "$i/auto_adjust_freq_threshold";
+							cecho "0" $i/auto_adjust_freq_threshold;
 						fi
 						if [ -e "$i/block_down_multiplier_hotplug1" ]; then
-							$busybox echo "1" > "$i/block_down_multiplier_hotplug1";
+							cecho "1" $i/block_down_multiplier_hotplug1;
 						fi
 						if [ -e "$i/block_down_multiplier_hotplug2" ]; then
-							$busybox echo "1" > "$i/block_down_multiplier_hotplug2";
+							cecho "1" $i/block_down_multiplier_hotplug2;
 						fi
 						if [ -e "$i/block_down_multiplier_hotplug3" ]; then
-							$busybox echo "1" > "$i/block_down_multiplier_hotplug3";
+							cecho "1" $i/block_down_multiplier_hotplug3;
 						fi
 						if [ -e "$i/block_down_multiplier_hotplug4" ]; then
-							$busybox echo "1" > "$i/block_down_multiplier_hotplug4";
+							cecho "1" $i/block_down_multiplier_hotplug4;
 						fi
 						if [ -e "$i/down_threshold" ]; then
-							$busybox echo "30" > "$i/down_threshold";
+							cecho "30" $i/down_threshold;
 						fi
 						if [ -e "$i/down_threshold_hotplug1" ]; then
-							$busybox echo "35" > "$i/down_threshold_hotplug1";
+							cecho "35" $i/down_threshold_hotplug1;
 						fi
 						if [ -e "$i/down_threshold_hotplug2" ]; then
-							$busybox echo "50" > "$i/down_threshold_hotplug2";
+							cecho "50" $i/down_threshold_hotplug2;
 						fi
 						if [ -e "$i/down_threshold_hotplug3" ]; then
-							$busybox echo "65" > "$i/down_threshold_hotplug3";
+							cecho "65" $i/down_threshold_hotplug3;
 						fi
 						if [ -e "$i/down_threshold_sleep" ]; then
-							$busybox echo "65" > "$i/down_threshold_sleep";
+							cecho "65" $i/down_threshold_sleep;
 						fi
 						if [ -e "$i/early_demand" ]; then
-							$busybox echo "0" > "$i/early_demand";
+							cecho "0" $i/early_demand;
 						fi
 						if [ -e "$i/early_demand_sleep" ]; then
-							$busybox echo "0" > "$i/early_demand_sleep";
+							cecho "0" $i/early_demand_sleep;
 						fi
 						if [ -e "$i/fast_scaling_down" ]; then
-							$busybox echo "4" > "$i/fast_scaling_down";
+							cecho "4" $i/fast_scaling_down;
 						fi
 						if [ -e "$i/fast_scaling_down_sleep" ]; then
-							$busybox echo "6" > "$i/fast_scaling_down_sleep";
+							cecho "6" $i/fast_scaling_down_sleep;
 						fi
 						if [ -e "$i/fast_scaling_up_sleep" ]; then
-							$busybox echo "0" > "$i/fast_scaling_up_sleep";
+							cecho "0" $i/fast_scaling_up_sleep;
 						fi
 						if [ -e "$i/fast_scaling_up" ]; then
-							$busybox echo "2" > "$i/fast_scaling_up";
+							cecho "2" $i/fast_scaling_up;
 						fi
 						if [ -e "$i/freq_limit" ]; then
-							$busybox echo "0" > "$i/freq_limit";
+							cecho "0" $i/freq_limit;
 						fi
 						if [ -e "$i/freq_limit_sleep" ]; then
-							$busybox echo "900000" > "$i/freq_limit_sleep";
+							cecho "900000" $i/freq_limit_sleep;
 						fi
 						if [ -e "$i/grad_up_threshold" ]; then
-							$busybox echo "50" > "$i/grad_up_threshold";
+							cecho "50" $i/grad_up_threshold;
 						fi
 						if [ -e "$i/grad_up_threshold_sleep" ]; then
-							$busybox echo "80" > "$i/grad_up_threshold_sleep";
+							cecho "80" $i/grad_up_threshold_sleep;
 						fi
 						if [ -e "$i/hotplug_block_down_cycles" ]; then
-							$busybox echo "0" > "$i/hotplug_block_down_cycles";
+							cecho "0" $i/hotplug_block_down_cycles;
 						fi
 						if [ -e "$i/hotplug__block_up_cycles" ]; then
-							$busybox echo "0" > "$i/hotplug_block_up_cycles";
+							cecho "0" $i/hotplug_block_up_cycles;
 						fi
 						if [ -e "$i/hotplug_engage_freq" ]; then
-							$busybox echo "0" > "$i/hotplug_engage_freq";
+							cecho "0" $i/hotplug_engage_freq;
 						fi
 						if [ -e "$i/hotplug_idle_freq" ]; then
-							$busybox echo "0" > "$i/hotplug_idle_freq";
+							cecho "0" $i/hotplug_idle_freq;
 						fi
 						if [ -e "$i/hotplug_idle_threshold" ]; then
-							$busybox echo "0" > "$i/hotplug_idle_threshold";
+							cecho "0" $i/hotplug_idle_threshold;
 						fi
 						if [ -e "$i/hotplug_lock" ]; then
-							$busybox echo "0" > "$i/hotplug_lock";
+							cecho "0" $i/hotplug_lock;
 						fi
 						if [ -e "$i/hotplug_max_limit" ]; then
-							$busybox echo "0" > "$i/hotplug_max_limit";
+							cecho "0" $i/hotplug_max_limit;
 						fi
 						if [ -e "$i/hotplug_min_limit" ]; then
-							$busybox echo "0" > "$i/hotplug_min_limit";
+							cecho "0" $i/hotplug_min_limit;
 						fi
 						if [ -e "$i/hotplug_sleep" ]; then
-							$busybox echo "0" > "$i/hotplug_sleep";
+							cecho "0" $i/hotplug_sleep;
 						fi
 						if [ -e "$i/hotplug_stagger_down" ]; then
-							$busybox echo "0" > "$i/hotplug_stagger_down";
+							cecho "0" $i/hotplug_stagger_down;
 						fi
 						if [ -e "$i/hotplug_stagger_up" ]; then
-							$busybox echo "0" > "$i/hotplug_stagger_up";
+							cecho "0" $i/hotplug_stagger_up;
 						fi
 						if [ -e "$i/ignore_nice_load" ]; then
-							$busybox echo "1" > "$i/ignore_nice_load";
+							cecho "1" $i/ignore_nice_load;
 						fi
 						if [ -e "$i/inputboost_cycles" ]; then
-							$busybox echo "0" > "$i/inputboost_cycles";
+							cecho "0" $i/inputboost_cycles;
 						fi
 						if [ -e "$i/inputboost_punch_cycles" ]; then
-							$busybox echo "0" > "$i/inputboost_punch_cycles";
+							cecho "0" $i/inputboost_punch_cycles;
 						fi
 						if [ -e "$i/inputboost_punch_freq" ]; then
-							$busybox echo "0" > "$i/inputboost_punch_freq";
+							cecho "0" $i/inputboost_punch_freq;
 						fi
 						if [ -e "$i/inputboost_punch_on_epenmove" ]; then
-							$busybox echo "0" > "$i/inputboost_punch_on_epenmove";
+							cecho "0" $i/inputboost_punch_on_epenmove;
 						fi
 						if [ -e "$i/inputboost_punch_on_fingerdown" ]; then
-							$busybox echo "0" > "$i/inputboost_punch_on_fingerdown";
+							cecho "0" $i/inputboost_punch_on_fingerdown;
 						fi
 						if [ -e "$i/inputboost_punch_on_fingermove" ]; then
-							$busybox echo "0" > "$i/inputboost_punch_on_fingermove";
+							cecho "0" $i/inputboost_punch_on_fingermove;
 						fi
 						if [ -e "$i/inputboost_typingbooster_cores" ]; then
-							$busybox echo "0" > "$i/inputboost_typingbooster_cores";
+							cecho "0" $i/inputboost_typingbooster_cores;
 						fi
 						if [ -e "$i/inputboost_typingbooster_up_threshold" ]; then
-							$busybox echo "60" > "$i/inputboost_typingbooster_up_threshold";
+							cecho "60" $i/inputboost_typingbooster_up_threshold;
 						fi
 						if [ -e "$i/inputboost_up_threshold" ]; then
-							$busybox echo "100" > "$i/inputboost_up_threshold";
+							cecho "100" $i/inputboost_up_threshold;
 						fi
 						if [ -e "$i/music_max_freq" ]; then
-							$busybox echo "600000" > "$i/music_max_freq";
+							cecho "600000" $i/music_max_freq;
 						fi
 						if [ -e "$i/music_min_cores" ]; then
-							$busybox echo "0" > "$i/music_min_cores";
+							cecho "0" $i/music_min_cores;
 						fi
 						if [ -e "$i/music_min_freq" ]; then
-							$busybox echo "${MIN_CPU_FREQ[$b]}" > "$i/music_min_freq";
+							cecho "$MIN_FREQ_1" $i/music_min_freq;
 						fi
 						if [ -e "$i/sampling_down_factor" ]; then
-							$busybox echo "1" > "$i/sampling_down_factor";
+							cecho "1" $i/sampling_down_factor;
 						fi
 						if [ -e "$i/sampling_down_max_momentum" ]; then
-							$busybox echo "0" > "$i/sampling_down_max_momentum";
+							cecho "0" $i/sampling_down_max_momentum;
 						fi
 						if [ -e "$i/sampling_down_max_sensitivity" ]; then
-							$busybox echo "75" > "$i/sampling_down_max_sensitivity";
+							cecho "75" $i/sampling_down_max_sensitivity;
 						fi
 						if [ -e "$i/sampling_rate" ]; then
-							$busybox echo "100000" > "$i/sampling_rate";
+							cecho "100000" $i/sampling_rate;
 						fi
 						if [ -e "$i/sampling_rate_idle" ]; then
-							$busybox echo "100000" > "$i/sampling_rate_idle";
+							cecho "100000" $i/sampling_rate_idle;
 						fi
 						if [ -e "$i/sampling_rate_idle_delay" ]; then
-							$busybox echo "0" > "$i/sampling_rate_idle_delay";
+							cecho "0" $i/sampling_rate_idle_delay;
 						fi
 						if [ -e "$i/sampling_rate_idle_threshold" ]; then
-							$busybox echo "50" > "$i/sampling_rate_idle_threshold";
+							cecho "50" $i/sampling_rate_idle_threshold;
 						fi
 						if [ -e "$i/sampling_rate_sleep_multiplier" ]; then
-							$busybox echo "2" > "$i/sampling_rate_sleep_multiplier";
+							cecho "2" $i/sampling_rate_sleep_multiplier;
 						fi
 						if [ -e "$i/scaling_block_cycles" ]; then
-							$busybox echo "0" > "$i/scaling_block_cycles";
+							cecho "0" $i/scaling_block_cycles;
 						fi
 						if [ -e "$i/scaling_block_force_down" ]; then
-							$busybox echo "0" > "$i/scaling_block_force_down";
+							cecho "0" $i/scaling_block_force_down;
 						fi
 						if [ -e "$i/scaling_block_freq" ]; then
-							$busybox echo "0" > "$i/scaling_block_freq";
+							cecho "0" $i/scaling_block_freq;
 						fi
 						if [ -e "$i/scaling_block_threshold" ]; then
-							$busybox echo "0" > "$i/scaling_block_threshold";
+							cecho "0" $i/scaling_block_threshold;
 						fi
 						if [ -e "$i/scaling_fastdown_down_threshold" ]; then
-							$busybox echo "0" > "$i/scaling_fastdown_down_threshold";
+							cecho "0" $i/scaling_fastdown_down_threshold;
 						fi
 						if [ -e "$i/scaling_fastdown_freq" ]; then
-							$busybox echo "0" > "$i/scaling_fastdown_freq";
+							cecho "0" $i/scaling_fastdown_freq;
 						fi
 						if [ -e "$i/scaling_fastdown_up_threshold" ]; then
-							$busybox echo "0" > "$i/scaling_fastdown_up_threshold";
+							cecho "0" $i/scaling_fastdown_up_threshold;
 						fi
 						if [ -e "$i/scaling_proportional" ]; then
-							$busybox echo "0" > "$i/scaling_proportional";
+							cecho "0" $i/scaling_proportional;
 						fi
 						if [ -e "$i/scaling_responsiveness_freq" ]; then
-							$busybox echo "0" > "$i/scaling_responsiveness_freq";
+							cecho "0" $i/scaling_responsiveness_freq;
 						fi
 						if [ -e "$i/scaling_responsiveness_up_threshold" ]; then
-							$busybox echo "0" > "$i/scaling_responsiveness_up_threshold";
+							cecho "0" $i/scaling_responsiveness_up_threshold;
 						fi
 						if [ -e "$i/scaling_up_block_cycles" ]; then
-							$busybox echo "5" > "$i/scaling_up_block_cycles";
+							cecho "5" $i/scaling_up_block_cycles;
 						fi
 						if [ -e "$i/scaling_up_block_freq" ]; then
-							$busybox echo "1900000" > "$i/scaling_up_block_freq";
+							cecho "1900000" $i/scaling_up_block_freq;
 						fi
 						if [ -e "$i/smooth_up" ]; then
-							$busybox echo "75" > "$i/smooth_up";
+							cecho "75" $i/smooth_up;
 						fi
 						if [ -e "$i/smooth_up_sleep" ]; then
-							$busybox echo "100" > "$i/smooth_up_sleep";
+							cecho "100" $i/smooth_up_sleep;
 						fi
 						if [ -e "$i/up_threshold" ]; then
-							$busybox echo "50" > "$i/up_threshold";
+							cecho "50" $i/up_threshold;
 						fi
 						if [ -e "$i/up_threshold_hotplug1" ]; then
-							$busybox echo "25" > "$i/up_threshold_hotplug1";
+							cecho "25" $i/up_threshold_hotplug1;
 						fi
 						if [ -e "$i/up_threshold_hotplug2" ]; then
-							$busybox echo "40" > "$i/up_threshold_hotplug2";
+							cecho "40" $i/up_threshold_hotplug2;
 						fi
 						if [ -e "$i/up_threshold_hotplug3" ]; then
-							$busybox echo "75" > "$i/up_threshold_hotplug3";
+							cecho "75" $i/up_threshold_hotplug3;
 						fi
 						if [ -e "$i/up_threshold_hotplug_freq1" ]; then
-							$busybox echo "0" > "$i/up_threshold_hotplug_freq1";
+							cecho "0" $i/up_threshold_hotplug_freq1;
 						fi
 						if [ -e "$i/up_threshold_hotplug_freq2" ]; then
-							$busybox echo "0" > "$i/up_threshold_hotplug_freq2";
+							cecho "0" $i/up_threshold_hotplug_freq2;
 						fi
 						if [ -e "$i/up_threshold_hotplug_freq3" ]; then
-							$busybox echo "0" > "$i/up_threshold_hotplug_freq3";
+							cecho "0" $i/up_threshold_hotplug_freq3;
 						fi
 						if [ -e "$i/up_threshold_sleep" ]; then
-							$busybox echo "90" > "$i/up_threshold_sleep";
+							cecho "90" $i/up_threshold_sleep;
 						fi
-						echo "Zzmoove has too many tunables. You better check at Kernel Adiutor - CPU - Governor Tunables" >> $TUNED
-				    fi
+					fi
 				done
 			fi
 		fi
 		#For BIG and dual cluster
-		if [ ${#CLUSTER[@]} -ge 2 ]; then
-			if [ -d ${GOVERNOR[$c]} ]; then
-				TL_1=$((${MIN_CPU_FREQ[$c]} + (${CDF[$c]} - 50000)))
-				TL_2=$(($TL_1 + (${CDF[$c]} - 40000)))
-				TL_3=$(($TL_2 + (${CDF[$c]} - 30000)))
-				TL_4=$(($TL_3 + (${CDF[$c]} - 20000)))
-				TL_5=$(($TL_4 + ${CDF[$c]}))
-				TL_6=$(($TL_5 + ${CDF[$c]}))
-				TL_7=$(($TL_6 + (${CDF[$c]} + 20000)))
-				TL_8=$(($TL_7 + ${CDF[$c]}))
-				TL_9=$(($TL_8 + (${CDF[$c]} + 50000)))
-				for i in ${GOVERNOR[$c]}; do
-					if [ "$CD" -eq 3 ]; then
-						break 1
-						$busybox echo "GT does not support your big cluster right now"
-					fi
-					if [ $bigLITTLE -eq 1 ]; then
-						if [ ${#CLUSTER[@]} -eq 3 ]; then
-							if [ $IN -eq 0 ]; then
-								if [ $i = ${GOVERNOR[0]} ]; then
-									$busybox echo -e "\e[01;37m Governor LITTLE core: ${CUR_GOVERNOR[0]} \e[00;37m" >> $TUNED
-								elif [ $i = ${GOVERNOR[1]} ]; then
-									$busybox echo -e "\e[01;37m Governor Middle core: ${CUR_GOVERNOR[1]} \e[00;37m" >> $TUNED
-								else
-									$busybox echo -e "\e[01;37m Governor big core:    ${CUR_GOVERNOR[2]} \e[00;37m" >> $TUNED
-								fi
-							else
-								if [ $i = ${GOVERNOR[2]} ]; then
-									$busybox echo -e "\e[01;37m Governor LITTLE core: ${CUR_GOVERNOR[2]} \e[00;37m" >> $TUNED
-								elif [ $i = ${GOVERNOR[1]} ]; then
-									$busybox echo -e "\e[01;37m Governor Middle core: ${CUR_GOVERNOR[1]} \e[00;37m" >> $TUNED
-								else
-									$busybox echo -e "\e[01;37m Governor big core:    ${CUR_GOVERNOR[0]} \e[00;37m" >> $TUNED
-								fi
-							fi
-						else
-							if [ $IN -eq 0 ]; then
-								if [ $i = ${GOVERNOR[0]} ]; then
-									$busybox echo -e "\e[01;37m Governor LITTLE core: ${CUR_GOVERNOR[0]} \e[00;37m" >> $TUNED
-								else
-									$busybox echo -e "\e[01;37m Governor big core:    ${CUR_GOVERNOR[1]} \e[00;37m" >> $TUNED
-								fi
-							else
-								if [ $i = ${GOVERNOR[1]} ]; then
-									$busybox echo -e "\e[01;37m Governor LITTLE core: ${CUR_GOVERNOR[1]} \e[00;37m" >> $TUNED
-								else
-									$busybox echo -e "\e[01;37m Governor big core:    ${CUR_GOVERNOR[0]} \e[00;37m" >> $TUNED
-								fi
-							fi
-						fi
-					else
-						if [ ${#CLUSTER[@]} -eq 2 ]; then
-							if [ $i = ${GOVERNOR[0]} ]; then
-								$busybox echo -e "\e[01;37m Governor CPU1: ${CUR_GOVERNOR[0]} \e[00;37m" >> $TUNED
-							elif [ $i = ${GOVERNOR[1]} ]; then
-								$busybox echo -e "\e[01;37m Governor CPU2: ${CUR_GOVERNOR[1]} \e[00;37m" >> $TUNED
-							fi
-						elif [ ${#CLUSTER[@]} -eq 1 ]; then
-							$busybox echo -e "\e[01;37m Governor: ${CUR_GOVERNOR[0]} \e[00;37m" >> $TUNED
-						fi
-					fi
+		if [ "$DC" -eq 1 ] || [ "$TC" -eq 1 ] || [ "$core_ctl" -eq 1 ]; then
+			if [ -d ${gov[$gc]} ] || [ "$core_ctl" -eq 1 ]; then
+				#TL_0 for only hispeed_freq
+				TL_0=$((${IP[2]} * 12))
+				TL_1=$(($MIN_FREQ_2 + (${IP[2]} * 3)))
+				TL_2=$(($TL_1 + ${CDF[2]} + (${IP[2]} * 2)))
+				TL_3=$(($TL_2 + ${CDF[2]} + ${IP[2]}))
+				TL_4=$(($TL_3 + (${CDF[2]} * 2)))
+				TL_5=$(($TL_4 + (${CDF[2]} * 2)))
+				TL_6=$(($TL_5 + (${CDF[2]} * 2)))
+				TL_7=$(($TL_6 + ${CDF[2]}))
+				TL_8=$(($TL_7 + ${CDF[2]}))
+				TL_9=$(($TL_8 + (${CDF[2]} * 2)))
+				for i in ${gov[$gc]}; do
+				if [ "$bL" -eq 1 ]; then
+								$busybox echo -e "\e[01;37m Governor BIG core: ${cur_gov[$ga]} \e[00;37m" >> $TUNED
+								$busybox echo -e "\e[01;37m Governor BIG core: ${cur_gov[$ga]} \e[00;37m" >> $TWEAKED
+				fi
+				if [ "$SC" -eq 1 ] || [ "$REG" -eq 1 ]; then
+				   $busybox echo -e "\e[01;37m Governor: ${cur_gov[$gc]} \e[00;37m" >> $TUNED
+				   $busybox echo -e "\e[01;37m Governor: ${cur_gov[$gc]} \e[00;37m" >> $TWEAKED
+				fi
 					chmod 644 $i/*
 					if [ -e "$i/above_hispeed_delay" ]; then
-						$busybox echo "20000 1900000:50000" > "$i/above_hispeed_delay";
-						$busybox echo "above_hispeed_delay" >> $TUNED
+						cecho "20000 1900000:50000" $i/above_hispeed_delay;
 					fi
 					if [ -e "$i/boost" ]; then
-						$busybox echo "0" > "$i/boost";
-						$busybox echo "boost" >> $TUNED
-					fi
-					if [ -e "$i/boostpulse" ]; then
-						$busybox echo "0" > "$i/boostpulse";
-						$busybox echo "boostpulse" >> $TUNED
+						cecho "0" $i/boost;
 					fi
 					if [ -e "$i/boostpulse_duration" ]; then
-						$busybox echo "0" > "$i/boostpulse_duration";
-						$busybox echo "boostpulse_duration" >> $TUNED
+						cecho "0" $i/boostpulse_duration;
 					fi
 					if [ -e "$i/go_hispeed_load" ]; then
-						if [ ${CDF[$c]} -lt 150000 ] && [ ${CDF[$c]} -gt 110000 ]; then
-							$busybox echo "87" > "$i/go_hispeed_load";
-						elif [ ${CDF[$c]} -lt 110000 ] && [ ${CDF[$c]} -gt 0 ]; then
-							$busybox echo "75" > "$i/go_hispeed_load";
+						if [ "${CDF[2]}" -lt 150000 ] && [ "${CDF[2]}" -gt 110000 ]; then
+							cecho "87" $i/go_hispeed_load;
+						elif [ "${CDF[2]}" -lt 110000 ] && [ "${CDF[2]}" -gt 0 ]; then
+							cecho "75" $i/go_hispeed_load;
 						else
-							$busybox echo "99" > "$i/go_hispeed_load";
-							$busybox echo "go_hispeed_load" >> $TUNED
+							cecho "99" $i/go_hispeed_load;
 						fi
 					fi
 					if [ -e "$i/hispeed_freq" ]; then
-						#Selecting the closest actual frequency to TL_$X
-						Q=0
-						if [ -e  ${FREQ_SOURCE[$c]} ] && [ $CD -ne 3 ]; then
-							while true; do
-								R=$($busybox cat ${FREQ_SOURCE[$c]} | cut -d ' ' -f$Q)
-								if [ $TL_7 -lt $R ]; then
-									S=$R
-									break
-								fi
-								Q=$(($Q + 1))
-							done
-							$busybox echo "$S" > "$i/hispeed_freq";
-							$busybox echo "hispeed_freq" >> $TUNED
-						fi
+							cecho "$((${HSF[2]} + $MIN_FREQ_2))" $i/hispeed_freq;
+							$busybox echo "BIG $((${HSF[2]} + $MIN_FREQ_2))"
+							$busybox sleep 1
 					fi
 					if [ -e "$i/max_freq_hysteresis" ]; then
-						$busybox echo "0" > "$i/max_freq_hysteresis";
-						$busybox echo "max_freq_hysteresis" >> $TUNED
+						cecho "0" $i/max_freq_hysteresis;
 					fi
 					if [ -e "$i/align_windows" ]; then
-						$busybox echo "0" > "$i/align_windows";
-						$busybox echo "align_windows" >> $TUNED
+						cecho "0" $i/align_windows;
 					fi
 					if [ -e "$i/io_is_busy" ]; then
-						$busybox echo "1" > "$i/io_is_busy";
-						$busybox echo "io_is_busy" >> $TUNED
+						cecho "1" $i/io_is_busy;
 					fi
 					if [ -e "$i/min_sample_time" ]; then
-						$busybox echo "50000" > "$i/min_sample_time";
-						$busybox echo "min_sample_time" >> $TUNED
+						cecho "50000" $i/min_sample_time;
 					fi
 					if [ -e "$i/sampling_down_factor" ]; then
-						$busybox echo "1" > "$i/sampling_down_factor";
-						$busybox echo "sampling_down_factor" >> $TUNED
+						cecho "1" $i/sampling_down_factor;
 					fi
 					if [ -e "$i/target_loads" ]; then
-						$busybox echo "0 ${MIN_CPU_FREQ[$c]}:10 $TL_1:20 $TL_2:30 $TL_3:40 $TL_4:45 $TL_5:50 $TL_6:60 $TL_7:70 $TL_8:85 $TL_9:95" > "$i/target_loads";
-						$busybox echo "target_loads" >> $TUNED
+						cecho "0 $MIN_FREQ_2:10 $TL_1:20 $TL_2:30 $TL_3:40 $TL_4:45 $TL_5:50 $TL_6:60 $TL_7:70 $TL_8:85 $TL_9:95" $i/target_loads;
 					fi
 					if [ -e "$i/timer_rate" ]; then
-						$busybox echo "20000" > "$i/timer_rate";
-						$busybox echo "timer_rate" >> $TUNED
+						cecho "20000" $i/timer_rate;
 					fi
 					if [ -e "$i/timer_slack" ]; then
-						$busybox echo "0" > "$i/timer_slack";
-						$busybox echo "timer_slack" >> $TUNED
+						cecho "0" $i/timer_slack;
 					fi
 					if [ -e "$i/up_threshold_any_cpu_freq" ]; then
-						$busybox echo "0" > "$i/up_threshold_any_cpu_freq";
-						$busybox echo "up_threshold_any_cpu_freq" >> $TUNED
+						cecho "0" $i/up_threshold_any_cpu_freq;
 					fi
 					if [ -e "$i/up_threshold_any_cpu_load" ]; then
-						$busybox echo "0" > "$i/up_threshold_any_cpu_load";
-						$busybox echo "up_threshold_any_cpu_load" >> $TUNED
+						cecho "0" $i/up_threshold_any_cpu_load;
 					fi
 					if [ -e "$i/down_threshold" ]; then
-						$busybox echo "40" > "$i/down_threshold";
-						$busybox echo "down_threshold" >> $TUNED
+						cecho "40" $i/down_threshold;
 					fi
 					if [ -e "$i/freq_step" ]; then
-						$busybox echo "30" > "$i/freq_step";
-						$busybox echo "freq_step" >> $TUNED
+						cecho "30" $i/freq_step;
 					fi
 					if [ -e "$i/ignore_nice_load" ]; then
-						$busybox echo "1" > "$i/ignore_nice_load";
-						$busybox echo "ignore_nice_load" >> $TUNED
+						cecho "1" $i/ignore_nice_load;
 					fi
-					if [ -e "$i/sampling_rate" ] && [ "${CUR_GOVERNOR[$c]}" != "conservative" ]; then
-						$busybox echo "45000" > "$i/sampling_rate";
-						$busybox echo "sampling_rate" >> $TUNED
+					if [ -e "$i/sampling_rate" ] && [[ "${cur_gov[$gc]}" != "conservative" && "${cur_gov[$gc]}" != "lionfish" ]]; then
+						cecho "30000" $i/sampling_rate;
 					fi
-					if [ -e "$i/sampling_rate_min" ] && [ "${CUR_GOVERNOR[$c]}" != "conservative" ]; then
-						$busybox echo "30000" > "$i/sampling_rate_min";
-						$busybox echo "sampling_rate_min" >> $TUNED
+					if [ -e "$i/sampling_rate_min" ] && [[ "${cur_gov[$gc]}" != "conservative" && "${cur_gov[$gc]}" != "ondemand" && "${cur_gov[$gc]}" != "lionfish" ]]; then
+						cecho "10000" $i/sampling_rate_min;
 					fi
 					if [ -e "$i/up_threshold" ]; then
-						$busybox echo "53" > "$i/up_threshold";
-						$busybox echo "up_threshold" >> $TUNED
+						cecho "53" $i/up_threshold;
 					fi
 					if [ -e "$i/sync_freq" ]; then
-						$busybox echo "0" > "$i/sync_freq";
-						$busybox echo "sync_freq" >> $TUNED
+						cecho "$MIN_FREQ_2" $i/sync_freq;
 					fi
 					if [ -e "$i/two_phase_freq" ]; then
-						$busybox echo "960000,960000,960000,960000" > "$i/two_phase_freq";
-						$busybox echo "two_phase_freq" >> $TUNED
+						cecho "960000,960000,960000,960000" $i/two_phase_freq;
 					fi
 					if [ -e "$i/jump_level" ]; then
-						$busybox echo "1000000" > "$i/jump_level";
-						$busybox echo "jump_level" >> $TUNED
+						cecho "1000000" $i/jump_level;
 					fi
 					if [ -e "$i/jump_threshold" ]; then
-						$busybox echo "60" > "$i/jump_threshold";
-						$busybox echo "jump_threshold" >> $TUNED
+						cecho "60" $i/jump_threshold;
 					fi
 					if [ -e "$i/powersave_bias" ]; then
-						$busybox echo "0" > "$i/powersave_bias";
-						$busybox echo "powersave_bias" >> $TUNED
+						cecho "0" $i/powersave_bias;
 					fi
 					if [ -e "$i/down_differential" ]; then
-						$busybox echo "8" > "$i/down_differential";
-						$busybox echo "down_differential" >> $TUNED
+						cecho "8" $i/down_differential;
 					fi
 					if [ -e "$i/second_phase_freq" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$c]}" > "$i/second_phase_freq";
-						$busybox echo "second_phase_freq" >> $TUNED
+						cecho "$MIN_FREQ_2" $i/second_phase_freq;
 					fi
 					if [ -e "$i/boostfreq" ]; then
-						$busybox echo "0" > "$i/boostfreq";
-						$busybox echo "boostfreq" >> $TUNED
+						cecho "0" $i/boostfreq;
 					fi
 					if [ -e "$i/micro_freq_up_threshold" ]; then
-						$busybox echo "65" > "$i/micro_freq_up_threshold";
-						$busybox echo "micro_freq_up_threshold" >> $TUNED
+						cecho "65" $i/micro_freq_up_threshold;
 					fi
 					if [ -e "$i/up_threshold_min_freq" ]; then
-						$busybox echo "600000" > "$i/up_threshold_min_freq";
-						$busybox echo "up_threshold_min_freq" >> $TUNED
+						cecho "600000" $i/up_threshold_min_freq;
 					fi
 					if [ -e "$i/ba_lock" ]; then
-						$busybox echo "0" > "$i/ba_lock";
-						$busybox echo "ba_lock" >> $TUNED
+						cecho "0" $i/ba_lock;
 					fi
 					if [ -e "$i/down_differential_multi_core" ]; then
-						$busybox echo "35" > "$i/down_differential_multi_core";
-						$busybox echo "down_differential_multi_core" >> $TUNED
+						cecho "35" $i/down_differential_multi_core;
 					fi
 					if [ -e "$i/freq_down_step" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$c]}" > "$i/freq_down_step";
-						$busybox echo "freq_down_step" >> $TUNED
+						cecho "$MIN_FREQ_2" $i/freq_down_step;
 					fi
 					if [ -e "$i/freq_down_step_barrier" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$c]}" > "$i/freq_down_step_barrier";
-						$busybox echo "freq_down_step_barrier" >> $TUNED
+						cecho "$MIN_FREQ_2" $i/freq_down_step_barrier;
 					fi
 					if [ -e "$i/input_event_min_freq" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$c]}, ${MIN_CPU_FREQ[$c]}, ${MIN_CPU_FREQ[$c]}, ${MIN_CPU_FREQ[$c]}" > "$i/input_event_min_freq";
-						$busybox echo "input_event_min_freq" >> $TUNED
+						cecho "$MIN_FREQ_2, $MIN_FREQ_2, $MIN_FREQ_2, $MIN_FREQ_2" $i/input_event_min_freq;
 					fi
 					if [ -e "$i/optimal_freq" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$c]}" > "$i/optimal_freq";
-						$busybox echo "optimal_freq" >> $TUNED
+						cecho "$MIN_FREQ_2" $i/optimal_freq;
 					fi
 					if [ -e "$i/shortcut" ]; then
-						$busybox echo "0" > "$i/shortcut";
-						$busybox echo "shortcut" >> $TUNED
+						cecho "0" $i/shortcut;
 					fi
 					if [ -e "$i/up_threshold_multi_core" ]; then
-						$busybox echo "0" > "$i/up_threshold_multi_core";
-						$busybox echo "up_threshold_multi_core" >> $TUNED
+						cecho "0" $i/up_threshold_multi_core;
 					fi
 					if [ -e "$i/freq_responsiveness" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$c]}" > "$i/freq_responsiveness";
-						$busybox echo "freq_responsiveness" >> $TUNED
+						cecho "$MIN_FREQ_2" $i/freq_responsiveness;
 					fi
 					if [ -e "$i/awake_ideal_freq" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$c]}" > "$i/awake_ideal_freq";
-						$busybox echo "awake_ideal_freq" >> $TUNED
+						cecho "$MIN_FREQ_2" $i/awake_ideal_freq;
 					fi
 					if [ -e "$i/boost_duration" ]; then
-						$busybox echo "0" > "$i/boost_duration";
-						$busybox echo "boost_duration" >> $TUNED
+						cecho "0" $i/boost_duration;
 					fi
 					if [ -e "$i/boost_freq" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$c]}" > "$i/boost_freq";
-						$busybox echo "boost_freq" >> $TUNED
+						cecho "$MIN_FREQ_2" $i/boost_freq;
 					fi
 					if [ -e "$i/debug_mask" ]; then
-						$busybox echo "32" > "$i/debug_mask";
-						$busybox echo "debug_mask" >> $TUNED
+						cecho "32" $i/debug_mask;
 					fi
 					if [ -e "$i/down_rate" ]; then
-						$busybox echo "10000" > "$i/down_rate";
-						$busybox echo "down_rate" >> $TUNED
+						cecho "10000" $i/down_rate;
 					fi
 					if [ -e "$i/ignore_nice" ]; then
-						$busybox echo "0" > "$i/ignore_nice";
-						$busybox echo "ignore_nice" >> $TUNED
+						cecho "0" $i/ignore_nice;
 					fi
 					if [ -e "$i/input_boost_duration" ]; then
-						$busybox echo "0" > "$i/input_boost_duration";
-						$busybox echo "input_boost_duration" >> $TUNED
+						cecho "0" $i/input_boost_duration;
 					fi
 					if [ -e "$i/max_cpu_load" ]; then
-						$busybox echo "100" > "$i/max_cpu_load";
-						$busybox echo "max_cpu_load" >> $TUNED
+						cecho "100" $i/max_cpu_load;
 					fi
 					if [ -e "$i/min_cpu_load" ]; then
-						$busybox echo "5" > "$i/min_cpu_load";
-						$busybox echo "min_cpu_load" >> $TUNED
+						cecho "5" $i/min_cpu_load;
 					fi
 					if [ -e "$i/min_sampling_rate" ]; then
-						$busybox echo "20000" > "$i/min_sampling_rate";
-						$busybox echo "min_sampling_rate" >> $TUNED
+						cecho "20000" $i/min_sampling_rate;
 					fi
 					if [ -e "$i/ramp_down_step" ]; then
-						$busybox echo "162000" > "$i/ramp_down_step";
-						$busybox echo "ramp_down_step" >> $TUNED
+						cecho "162000" $i/ramp_down_step;
 					fi
 					if [ -e "$i/ramp_up_during_boost" ]; then
-						$busybox echo "0" > "$i/ramp_up_during_boost";
-						$busybox echo "ramp_up_during_boost" >> $TUNED
+						cecho "0" $i/ramp_up_during_boost;
 					fi
 					if [ -e "$i/ramp_up_step" ]; then
-						$busybox echo "100000" > "$i/ramp_up_step";
-						$busybox echo "ramp_up_step" >> $TUNED
+						cecho "100000" $i/ramp_up_step;
 					fi
 					if [ -e "$i/suspend_ideal_freq" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$c]}" > "$i/suspend_ideal_freq";
-						$busybox echo "suspend_ideal_freq" >> $TUNED
+						cecho "$MIN_FREQ_2" $i/suspend_ideal_freq;
 					fi
 					if [ -e "$i/touch_poke_freq" ]; then
-						$busybox echo "0" > "$i/touch_poke_freq";
-						$busybox echo "touch_poke_freq" >> $TUNED
+						cecho "0" $i/touch_poke_freq;
 					fi
 					if [ -e "$i/up_rate" ]; then
-						$busybox echo "0" > "$i/up_rate";
-						$busybox echo "up_rate" >> $TUNED
+						cecho "0" $i/up_rate;
 					fi
 					if [ -e "$i/optimal_max_freq" ]; then
-						$busybox echo "2000000" > "$i/optimal_max_freq";
-						$busybox echo "optimal_max_freq" >> $TUNED
+						cecho "2000000" $i/optimal_max_freq;
 					fi
 					if [ -e "$i/freq_calc_thresh" ]; then
-						$busybox echo "1100000" > "$i/freq_calc_thresh";
-						$busybox echo "freq_calc_thresh" >> $TUNED
+						cecho "1100000" $i/freq_calc_thresh;
 					fi
 					if [ -e "$i/allowed_misses" ]; then
-						$busybox echo "5" > "$i/allowed_misses";
-						$busybox echo "allowed_misses" >> $TUNED
+						cecho "5" $i/allowed_misses;
 					fi
 					if [ -e "$i/target_residency" ]; then
-						$busybox echo "10000" > "$i/target_residency";
-						$busybox echo "target_residency" >> $TUNED
+						cecho "10000" $i/target_residency;
 					fi
 					if [ -e "$i/inter_hifreq" ]; then
-						$busybox echo "1500000" > "$i/inter_hifreq";
-						$busybox echo "inter_hifreq" >> $TUNED
+						cecho "1500000" $i/inter_hifreq;
 					fi
 					if [ -e "$i/inter_lofreq" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$c]}" > "$i/inter_lofreq";
-						$busybox echo "inter_lofreq" >> $TUNED
+						cecho "$MIN_FREQ_2" $i/inter_lofreq;
 					fi
 					if [ -e "$i/inter_staycycles" ]; then
-						$busybox echo "4" > "$i/inter_staycycles";
-						$busybox echo "inter_staycycles" >> $TUNED
+						cecho "4" $i/inter_staycycles;
 					fi
 					if [ -e "$i/staycycles_resetfreq" ]; then
-						$busybox echo "1100000" > "$i/staycycles_resetfreq";
-						$busybox echo "statcycles_resetfreq" >> $TUNED
+						cecho "1100000" $i/staycycles_resetfreq;
 					fi
 					if [ -e "$i/input_boost_duration" ]; then
-						$busybox echo "0" > "$i/input_boost_duration";
-						$busybox echo "input_boost_duration" >> $TUNED
-					fi
-					if [ -e "$i/input_boost_duration" ]; then
-						$busybox echo "0" > "$i/input_boost_duration";
-						$busybox echo "input_boost_duration" >> $TUNED
+						cecho "0" $i/input_boost_duration;
 					fi
 					if [ -e "$i/sampling_easy_factor" ]; then
-						$busybox echo "2" > "$i/sampling_easy_factor";
-						$busybox echo "sampling_easy_factor" >> $TUNED
+						cecho "2" $i/sampling_easy_factor;
 					fi
 					if [ -e "$i/sampling_interim_factor" ]; then
-						$busybox echo "3" > "$i/sampling_interim_factor";
-						$busybox echo "sampling_interim_factor" >> $TUNED
+						cecho "3" $i/sampling_interim_factor;
 					fi
 					if [ -e "$i/ui_sampling_rate" ]; then
-						$busybox echo "45000" > "$i/ui_sampling_rate";
-						$busybox echo "ui_sampling_rate" >> $TUNED
+						cecho "45000" $i/ui_sampling_rate;
 					fi
 					if [ -e "$i/ui_timeout" ]; then
-						$busybox echo "40" > "$i/ui_timeout";
-						$busybox echo "ui_timeout" >> $TUNED
+						cecho "40" $i/ui_timeout;
 					fi
 					if [ -e "$i/down_sample_time" ]; then
-						$busybox echo "10000" > "$i/down_sample_time";
-						$busybox echo "down_sample_time" >> $TUNED
+						cecho "10000" $i/down_sample_time;
 					fi
 					if [ -e "$i/up_sample_time" ]; then
-						$busybox echo "50000" > "$i/up_sample_time";
-						$busybox echo "up_sample_time" >> $TUNED
+						cecho "50000" $i/up_sample_time;
 					fi
 					if [ -e "$i/active_floor_freq" ]; then
-						$busybox echo "${MIN_CPU_FREQ[$c]}" > "$i/active_floor_freq";
-						$busybox echo "active_floor_freq" >> $TUNED
+						cecho "$MIN_FREQ_2" $i/active_floor_freq;
 					fi
 					if [ -e "$i/powersave" ]; then
-						$busybox echo "0" > "$i/powersave";
-						$busybox echo "powesave" >> $TUNED
+						cecho "0" $i/powersave;
 					fi
 					if [ -e "$i/fastlane" ]; then
-						$busybox echo "0" > "$i/fastlane";
-						$busybox echo "fastlane" >> $TUNED
+						cecho "0" $i/fastlane;
 					fi
 					if [ -e "$i/input_boost_freq" ]; then
-						$busybox echo "600000" > "$i/input_boost_freq";
-						$busybox echo "input_boost_freq" >> $TUNED
+						cecho "600000" $i/input_boost_freq;
 					fi
 					if [ -e "$i/low_load_down_threshold" ]; then
-						$busybox echo "10" > "$i/low_load_down_threshold";
-						$busybox echo "low_load_down_threshold" >> $TUNED
+						cecho "10" $i/low_load_down_threshold;
 					fi
-					if [ ${CUR_GOVERNOR[$c]} = "zzmoove" ]; then
+					if [ "${cur_gov[$gc]}" = "zzmoove" ]; then
 						if [ -s $i/profile_number ]; then
 							pn=$($busybox cat $i/profile_number)
-							if [ $pn -ne 0 ]; then
-								$busybox echo "0" > "$i/profile_number";
+							if [ "$pn" -ne 0 ]; then
+								cecho "0" $i/profile_number;
 							fi
-						fi 
+						fi
 						if [ -e "$i/afs_threshold1" ]; then
-							$busybox echo "20" > "$i/afs_threshold1";
+							cecho "20" $i/afs_threshold1;
 						fi
 						if [ -e "$i/afs_threshold2" ]; then
-							$busybox echo "40" > "$i/afs_threshold2";
+							cecho "40" $i/afs_threshold2;
 						fi
 						if [ -e "$i/afs_threshold3" ]; then
-							$busybox echo "60" > "$i/afs_threshold3";
+							cecho "60" $i/afs_threshold3;
 						fi
 						if [ -e "$i/afs_threshold4" ]; then
-							$busybox echo "75" > "$i/afs_threshold4";
+							cecho "75" $i/afs_threshold4;
 						fi
 							if [ -e "$i/auto_adjust_freq_threshold" ]; then
-							$busybox echo "0" > "$i/auto_adjust_freq_threshold";
+							cecho "0" $i/auto_adjust_freq_threshold;
 						fi
 						if [ -e "$i/block_down_multiplier_hotplug1" ]; then
-							$busybox echo "1" > "$i/block_down_multiplier_hotplug1";
+							cecho "1" $i/block_down_multiplier_hotplug1;
 						fi
 						if [ -e "$i/block_down_multiplier_hotplug2" ]; then
-							$busybox echo "1" > "$i/block_down_multiplier_hotplug2";
+							cecho "1" $i/block_down_multiplier_hotplug2;
 						fi
 						if [ -e "$i/block_down_multiplier_hotplug3" ]; then
-							$busybox echo "1" > "$i/block_down_multiplier_hotplug3";
+							cecho "1" $i/block_down_multiplier_hotplug3;
 						fi
 						if [ -e "$i/block_down_multiplier_hotplug4" ]; then
-							$busybox echo "1" > "$i/block_down_multiplier_hotplug4";
+							cecho "1" $i/block_down_multiplier_hotplug4;
 						fi
 						if [ -e "$i/down_threshold" ]; then
-							$busybox echo "30" > "$i/down_threshold";
+							cecho "30" $i/down_threshold;
 						fi
 						if [ -e "$i/down_threshold_hotplug1" ]; then
-							$busybox echo "35" > "$i/down_threshold_hotplug1";
+							cecho "35" $i/down_threshold_hotplug1;
 						fi
 						if [ -e "$i/down_threshold_hotplug2" ]; then
-							$busybox echo "50" > "$i/down_threshold_hotplug2";
+							cecho "50" $i/down_threshold_hotplug2;
 						fi
 						if [ -e "$i/down_threshold_hotplug3" ]; then
-							$busybox echo "65" > "$i/down_threshold_hotplug3";
+							cecho "65" $i/down_threshold_hotplug3;
 						fi
 						if [ -e "$i/down_threshold_sleep" ]; then
-							$busybox echo "65" > "$i/down_threshold_sleep";
+							cecho "65" $i/down_threshold_sleep;
 						fi
 						if [ -e "$i/early_demand" ]; then
-							$busybox echo "0" > "$i/early_demand";
+							cecho "0" $i/early_demand;
 						fi
 						if [ -e "$i/early_demand_sleep" ]; then
-							$busybox echo "0" > "$i/early_demand_sleep";
+							cecho "0" $i/early_demand_sleep;
 						fi
 						if [ -e "$i/fast_scaling_down" ]; then
-							$busybox echo "4" > "$i/fast_scaling_down";
+							cecho "4" $i/fast_scaling_down;
 						fi
 						if [ -e "$i/fast_scaling_down_sleep" ]; then
-							$busybox echo "6" > "$i/fast_scaling_down_sleep";
+							cecho "6" $i/fast_scaling_down_sleep;
 						fi
 						if [ -e "$i/fast_scaling_up_sleep" ]; then
-							$busybox echo "0" > "$i/fast_scaling_up_sleep";
+							cecho "0" $i/fast_scaling_up_sleep;
 						fi
 						if [ -e "$i/fast_scaling_up" ]; then
-							$busybox echo "2" > "$i/fast_scaling_up";
+							cecho "2" $i/fast_scaling_up;
 						fi
 						if [ -e "$i/freq_limit" ]; then
-							$busybox echo "0" > "$i/freq_limit";
+							cecho "0" $i/freq_limit;
 						fi
 						if [ -e "$i/freq_limit_sleep" ]; then
-							$busybox echo "900000" > "$i/freq_limit_sleep";
+							cecho "900000" $i/freq_limit_sleep;
 						fi
 						if [ -e "$i/grad_up_threshold" ]; then
-							$busybox echo "50" > "$i/grad_up_threshold";
+							cecho "50" $i/grad_up_threshold;
 						fi
 						if [ -e "$i/grad_up_threshold_sleep" ]; then
-							$busybox echo "80" > "$i/grad_up_threshold_sleep";
+							cecho "80" $i/grad_up_threshold_sleep;
 						fi
 						if [ -e "$i/hotplug_block_down_cycles" ]; then
-							$busybox echo "0" > "$i/hotplug_block_down_cycles";
+							cecho "0" $i/hotplug_block_down_cycles;
 						fi
 						if [ -e "$i/hotplug__block_up_cycles" ]; then
-							$busybox echo "0" > "$i/hotplug_block_up_cycles";
+							cecho "0" $i/hotplug_block_up_cycles;
 						fi
 						if [ -e "$i/hotplug_engage_freq" ]; then
-							$busybox echo "0" > "$i/hotplug_engage_freq";
+							cecho "0" $i/hotplug_engage_freq;
 						fi
 						if [ -e "$i/hotplug_idle_freq" ]; then
-							$busybox echo "0" > "$i/hotplug_idle_freq";
+							cecho "0" $i/hotplug_idle_freq;
 						fi
 						if [ -e "$i/hotplug_idle_threshold" ]; then
-							$busybox echo "0" > "$i/hotplug_idle_threshold";
+							cecho "0" $i/hotplug_idle_threshold;
 						fi
 						if [ -e "$i/hotplug_lock" ]; then
-							$busybox echo "0" > "$i/hotplug_lock";
+							cecho "0" $i/hotplug_lock;
 						fi
 						if [ -e "$i/hotplug_max_limit" ]; then
-							$busybox echo "0" > "$i/hotplug_max_limit";
+							cecho "0" $i/hotplug_max_limit;
 						fi
 						if [ -e "$i/hotplug_min_limit" ]; then
-							$busybox echo "0" > "$i/hotplug_min_limit";
+							cecho "0" $i/hotplug_min_limit;
 						fi
 						if [ -e "$i/hotplug_sleep" ]; then
-							$busybox echo "0" > "$i/hotplug_sleep";
+							cecho "0" $i/hotplug_sleep;
 						fi
 						if [ -e "$i/hotplug_stagger_down" ]; then
-							$busybox echo "0" > "$i/hotplug_stagger_down";
+							cecho "0" $i/hotplug_stagger_down;
 						fi
 						if [ -e "$i/hotplug_stagger_up" ]; then
-							$busybox echo "0" > "$i/hotplug_stagger_up";
+							cecho "0" $i/hotplug_stagger_up;
 						fi
 						if [ -e "$i/ignore_nice_load" ]; then
-							$busybox echo "1" > "$i/ignore_nice_load";
+							cecho "1" $i/ignore_nice_load;
 						fi
 						if [ -e "$i/inputboost_cycles" ]; then
-							$busybox echo "0" > "$i/inputboost_cycles";
+							cecho "0" $i/inputboost_cycles;
 						fi
 						if [ -e "$i/inputboost_punch_cycles" ]; then
-							$busybox echo "0" > "$i/inputboost_punch_cycles";
+							cecho "0" $i/inputboost_punch_cycles;
 						fi
 						if [ -e "$i/inputboost_punch_freq" ]; then
-							$busybox echo "0" > "$i/inputboost_punch_freq";
+							cecho "0" $i/inputboost_punch_freq;
 						fi
 						if [ -e "$i/inputboost_punch_on_epenmove" ]; then
-							$busybox echo "0" > "$i/inputboost_punch_on_epenmove";
+							cecho "0" $i/inputboost_punch_on_epenmove;
 						fi
 						if [ -e "$i/inputboost_punch_on_fingerdown" ]; then
-							$busybox echo "0" > "$i/inputboost_punch_on_fingerdown";
+							cecho "0" $i/inputboost_punch_on_fingerdown;
 						fi
 						if [ -e "$i/inputboost_punch_on_fingermove" ]; then
-							$busybox echo "0" > "$i/inputboost_punch_on_fingermove";
+							cecho "0" $i/inputboost_punch_on_fingermove;
 						fi
 						if [ -e "$i/inputboost_typingbooster_cores" ]; then
-							$busybox echo "0" > "$i/inputboost_typingbooster_cores";
+							cecho "0" $i/inputboost_typingbooster_cores;
 						fi
 						if [ -e "$i/inputboost_typingbooster_up_threshold" ]; then
-							$busybox echo "60" > "$i/inputboost_typingbooster_up_threshold";
+							cecho "60" $i/inputboost_typingbooster_up_threshold;
 						fi
 						if [ -e "$i/inputboost_up_threshold" ]; then
-							$busybox echo "100" > "$i/inputboost_up_threshold";
+							cecho "100" $i/inputboost_up_threshold;
 						fi
 						if [ -e "$i/music_max_freq" ]; then
-							$busybox echo "600000" > "$i/music_max_freq";
+							cecho "600000" $i/music_max_freq;
 						fi
 						if [ -e "$i/music_min_cores" ]; then
-							$busybox echo "0" > "$i/music_min_cores";
+							cecho "0" $i/music_min_cores;
 						fi
 						if [ -e "$i/music_min_freq" ]; then
-							$busybox echo "${MIN_CPU_FREQ[$c]}" > "$i/music_min_freq";
+							cecho "$MIN_FREQ_2" $i/music_min_freq;
 						fi
 						if [ -e "$i/sampling_down_factor" ]; then
-							$busybox echo "1" > "$i/sampling_down_factor";
+							cecho "1" $i/sampling_down_factor;
 						fi
 						if [ -e "$i/sampling_down_max_momentum" ]; then
-							$busybox echo "0" > "$i/sampling_down_max_momentum";
+							cecho "0" $i/sampling_down_max_momentum;
 						fi
 						if [ -e "$i/sampling_down_max_sensitivity" ]; then
-							$busybox echo "75" > "$i/sampling_down_max_sensitivity";
+							cecho "75" $i/sampling_down_max_sensitivity;
 						fi
 						if [ -e "$i/sampling_rate" ]; then
-							$busybox echo "100000" > "$i/sampling_rate";
+							cecho "100000" $i/sampling_rate;
 						fi
 						if [ -e "$i/sampling_rate_idle" ]; then
-							$busybox echo "100000" > "$i/sampling_rate_idle";
+							cecho "100000" $i/sampling_rate_idle;
 						fi
 						if [ -e "$i/sampling_rate_idle_delay" ]; then
-							$busybox echo "0" > "$i/sampling_rate_idle_delay";
+							cecho "0" $i/sampling_rate_idle_delay;
 						fi
 						if [ -e "$i/sampling_rate_idle_threshold" ]; then
-							$busybox echo "50" > "$i/sampling_rate_idle_threshold";
+							cecho "50" $i/sampling_rate_idle_threshold;
 						fi
 						if [ -e "$i/sampling_rate_sleep_multiplier" ]; then
-							$busybox echo "2" > "$i/sampling_rate_sleep_multiplier";
+							cecho "2" $i/sampling_rate_sleep_multiplier;
 						fi
 						if [ -e "$i/scaling_block_cycles" ]; then
-							$busybox echo "0" > "$i/scaling_block_cycles";
+							cecho "0" $i/scaling_block_cycles;
 						fi
 						if [ -e "$i/scaling_block_force_down" ]; then
-							$busybox echo "0" > "$i/scaling_block_force_down";
+							cecho "0" $i/scaling_block_force_down;
 						fi
 						if [ -e "$i/scaling_block_freq" ]; then
-							$busybox echo "0" > "$i/scaling_block_freq";
+							cecho "0" $i/scaling_block_freq;
 						fi
 						if [ -e "$i/scaling_block_threshold" ]; then
-							$busybox echo "0" > "$i/scaling_block_threshold";
+							cecho "0" $i/scaling_block_threshold;
 						fi
 						if [ -e "$i/scaling_fastdown_down_threshold" ]; then
-							$busybox echo "0" > "$i/scaling_fastdown_down_threshold";
+							cecho "0" $i/scaling_fastdown_down_threshold;
 						fi
 						if [ -e "$i/scaling_fastdown_freq" ]; then
-							$busybox echo "0" > "$i/scaling_fastdown_freq";
+							cecho "0" $i/scaling_fastdown_freq;
 						fi
 						if [ -e "$i/scaling_fastdown_up_threshold" ]; then
-							$busybox echo "0" > "$i/scaling_fastdown_up_threshold";
+							cecho "0" $i/scaling_fastdown_up_threshold;
 						fi
 						if [ -e "$i/scaling_proportional" ]; then
-							$busybox echo "0" > "$i/scaling_proportional";
+							cecho "0" $i/scaling_proportional;
 						fi
 						if [ -e "$i/scaling_responsiveness_freq" ]; then
-							$busybox echo "0" > "$i/scaling_responsiveness_freq";
+							cecho "0" $i/scaling_responsiveness_freq;
 						fi
 						if [ -e "$i/scaling_responsiveness_up_threshold" ]; then
-							$busybox echo "0" > "$i/scaling_responsiveness_up_threshold";
+							cecho "0" $i/scaling_responsiveness_up_threshold;
 						fi
 						if [ -e "$i/scaling_up_block_cycles" ]; then
-							$busybox echo "5" > "$i/scaling_up_block_cycles";
+							cecho "5" $i/scaling_up_block_cycles;
 						fi
 						if [ -e "$i/scaling_up_block_freq" ]; then
-							$busybox echo "1900000" > "$i/scaling_up_block_freq";
+							cecho "1900000" $i/scaling_up_block_freq;
 						fi
 						if [ -e "$i/smooth_up" ]; then
-							$busybox echo "75" > "$i/smooth_up";
+							cecho "75" $i/smooth_up;
 						fi
 						if [ -e "$i/smooth_up_sleep" ]; then
-							$busybox echo "100" > "$i/smooth_up_sleep";
+							cecho "100" $i/smooth_up_sleep;
 						fi
 						if [ -e "$i/up_threshold" ]; then
-							$busybox echo "50" > "$i/up_threshold";
+							cecho "50" $i/up_threshold;
 						fi
 						if [ -e "$i/up_threshold_hotplug1" ]; then
-							$busybox echo "25" > "$i/up_threshold_hotplug1";
+							cecho "25" $i/up_threshold_hotplug1;
 						fi
 						if [ -e "$i/up_threshold_hotplug2" ]; then
-							$busybox echo "40" > "$i/up_threshold_hotplug2";
+							cecho "40" $i/up_threshold_hotplug2;
 						fi
 						if [ -e "$i/up_threshold_hotplug3" ]; then
-							$busybox echo "75" > "$i/up_threshold_hotplug3";
+							cecho "75" $i/up_threshold_hotplug3;
 						fi
 						if [ -e "$i/up_threshold_hotplug_freq1" ]; then
-							$busybox echo "0" > "$i/up_threshold_hotplug_freq1";
+							cecho "0" $i/up_threshold_hotplug_freq1;
 						fi
 						if [ -e "$i/up_threshold_hotplug_freq2" ]; then
-							$busybox echo "0" > "$i/up_threshold_hotplug_freq2";
+							cecho "0" $i/up_threshold_hotplug_freq2;
 						fi
 						if [ -e "$i/up_threshold_hotplug_freq3" ]; then
-							$busybox echo "0" > "$i/up_threshold_hotplug_freq3";
+							cecho "0" $i/up_threshold_hotplug_freq3;
 						fi
 						if [ -e "$i/up_threshold_sleep" ]; then
-							$busybox echo "90" > "$i/up_threshold_sleep";
+							cecho "90" $i/up_threshold_sleep;
 						fi
-						echo "Zzmoove has too many tunables. You better check at Kernel Adiutor - CPU - Governor Tunables" >> $TUNED
 					fi
+					if [ "$core_ctl" -eq 1 ]; then
+				       gc=$((gc+1))
+				        if [ "$gc" -eq $CORE ]; then
+				          echo "Breaking small cluster"
+						  break 1
+					    fi
+                    fi
 				done
 			fi
 		fi
 		if [ -e "/data/system/tuned" ]; then
-			if [ $bigLITTLE -eq 1 ]; then
-				if [ ${#CLUSTER[@]} -eq 3 ]; then
+			if [ "$bL" -eq 1 ]; then
+				if [ "$TC" -eq 1 ]; then
 					#For triple cluster
-					if [ $IN -eq 0 ]; then
-						$busybox echo "Performance ${CUR_GOVERNOR[0]} tweaks applied.";
-						$busybox echo "Performance ${CUR_GOVERNOR[1]} tweaks applied.";
-						$busybox echo "Performance ${CUR_GOVERNOR[2]} tweaks applied.";
-					else
-						$busybox echo "Performance ${CUR_GOVERNOR[2]} tweaks applied.";
-						$busybox echo "Performance ${CUR_GOVERNOR[1]} tweaks applied.";
-						$busybox echo "Performance ${CUR_GOVERNOR[0]} tweaks applied.";
-					fi
-				else
-					#For dual cluster
-					if [ $IN -eq 0 ]; then
-						$busybox echo "Performance ${CUR_GOVERNOR[0]} tweaks applied.";
-						$busybox echo "Performance ${CUR_GOVERNOR[1]} tweaks applied.";
-					else
-						$busybox echo "Performance ${CUR_GOVERNOR[1]} tweaks applied.";
-						$busybox echo "Performance ${CUR_GOVERNOR[0]} tweaks applied.";
-					fi
+						$busybox echo "Performance ${cur_gov[$ga]} tweaks applied.";
+						$busybox echo "Performance ${cur_gov[$gb]} tweaks applied.";
+						$busybox echo "Performance ${cur_gov[$gc]} tweaks applied.";
 				fi
-			else
-				if [ ${#CLUSTER[@]} -eq 2 ]; then
-					if [ $i = ${GOVERNOR[0]} ]; then
-						$busybox echo "Performance ${CUR_GOVERNOR[0]} tweaks applied.";
-					elif [ $i = ${GOVERNOR[1]} ]; then
-						$busybox echo "Performance ${CUR_GOVERNOR[1]} tweaks applied.";
-					fi
-				elif [ ${#CLUSTER[@]} -eq 1 ]; then
-					$busybox echo "Performance ${CUR_GOVERNOR[0]} tweaks applied.";
+				if [ "$DC" -eq 1 ]; then
+					#For dual cluster
+					$busybox echo "Performance ${cur_gov[$ga]} tweaks applied.";
+					$busybox echo "Performance ${cur_gov[$gc]} tweaks applied.";
 				fi
 			fi
-		else 
+			if [ "$SC" -eq 1 ] || [ "$REG" -eq 1 ]; then
+				$busybox echo "Performance ${cur_gov[$ga]} tweaks applied.";
+			fi
+		else
 			$busybox echo "Governor Tunables not compatible";
-			$busybox echo "${CUR_GOVERNOR[0]} Tunables not compatible" > $TUNED
+			$busybox echo "${cur_gov[$ga]} Tunables not compatible" > $TUNED
+			$busybox echo "${cur_gov[$ga]} Tunables not compatible" > $TWEAKED
 		fi
 		$busybox echo "";
-		sleep 180;
+		if [ -f $INTERVAL ] && [[ $(cat $INTERVAL 2>/dev/null) && $(cat $INTERVAL) -ne 0 ]]; then
+			sleep $(cat $INTERVAL);
+		elif [ -f $INTERVAL ] && [ $(cat $INTERVAL) -eq 0 ]; then
+			break
+		else
+			sleep 180;
+		fi
 	fi
 done

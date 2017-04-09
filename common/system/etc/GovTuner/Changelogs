@@ -13,25 +13,15 @@
 #  You should have received a copy of the GNU General Public License along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #=======================================================================#
 busybox="/system/etc/GovTuner/busybox"
-ver="3.9.1"
+changelog="/system/etc/GovTuner/changelog.txt"
+ver="4.0"
 divider="==============================================="
 $busybox echo "CHANGELOG FOR $ver"
 $busybox echo "----------------------"
+cat $changelog
 $busybox echo ""
-$busybox echo "Added Cluster support universally for all Android devices  (cannot give 100% assurance as we don't own all the devices)"
-$busybox echo "Reworked UI"
-$busybox echo "Added option to change governor from Main menu"
-$busybox echo "Added option to enable/disable power efficient workqueues"
-$busybox echo "New Dynamic method for assigning target load frequencies , now the frequencies specified will not be out of range for your device"
-$busybox echo "New Dynamic method for assigning hispeed_freq and go_hispeed_load"
-$busybox echo "Interactive totally , major update, Values updated for all Profiles "
 $busybox echo ""
-$busybox echo "New optimizations for Zzmoove governor"
-$busybox echo "Fixed error of profiles not showing up on some devices"
-$busybox echo ""
-$busybox echo -n "b. Back to menu: "
-read -r character
-case $character in
-b|B)$busybox clear;
-sh /system/bin/govtuner;;
-esac
+$busybox echo -n "Press enter to go back"
+read
+clear
+exit
