@@ -19,7 +19,10 @@
 
 version=$1
 dir=$(pwd)
-
+GT_in1="$dir/common/system/etc/GovTuner"
+GT_in2="$dir/common/system/etc/GovTuner/profiles"
+GT_out1="/sdcard/GT_dev"
+#GT_out2="/system/etc/GovTuner/profiles"
 if [ ! -d output ]; then
 	mkdir output
 fi
@@ -50,8 +53,19 @@ echo "Push file to sdcard? (Y/n) : "
              exit
           fi
           if [ "$total" -gt 1 ]; then
-             adb push Gov-Tuner_$version.zip /sdcard/Gov-Tuner_$version.zip
-             echo "File copied to sdcard"
+             adb push $dir/output/Gov-Tuner_$version.zip /sdcard/Gov-Tuner_$version.zip
+             adb push $dir/output/file_copy_GT.sh $GT_out1/file_copy_GT.sh
+             adb push $GT_in1/govtuner $GT_out1/govtuner
+             adb push $GT_in2/GovTuner_hybrid $GT_out1/GovTuner_hybrid
+             adb push $GT_in2/field_table_big $GT_out1/field_table_big
+             adb push $GT_in2/field_table_middle $GT_out1/field_table_middle
+             adb push $GT_in2/field_table_little $GT_out1/field_table_little
+             adb push $GT_in1/Changelogs $GT_out1/Changelogs
+             adb push $GT_in1/changelog.txt $GT_out1/changelog.txt
+             adb push $GT_in1/00gt_init $GT_out1/00gt_init
+             sleep 0.5
+             sleep 0.5
+             echo "Files copied to sdcard"
                echo "Reboot recovery? (Y/n) : "
                read -r q
                case $q in
